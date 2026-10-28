@@ -2153,6 +2153,19 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     }
   },
   {
+    "id": "developer.open-in-kiro-cli",
+    "label": "Open in kiro-cli",
+    "labelKey": "pages.developer.featurePreviewsTab.open_in_kiro_cli",
+    "description": "Continues a Kiro Agent chat in kiro-cli, Kiro's terminal chat app, in the terminal panel.",
+    "hint": "Continue a Kiro Agent chat in kiro-cli, Kiro's terminal chat app, in the terminal panel. There the chat's agent can run commands on this computer, and kiro-cli asks you before each one. Only Kiro Agent chats can open there.",
+    "tab": "developer",
+    "type": "toggle",
+    "occurrence": 1,
+    "params": {
+      "sub": "feature-previews"
+    }
+  },
+  {
     "id": "developer.remote-dispatch",
     "label": "Remote dispatch",
     "labelKey": "pages.developer.featurePreviewsTab.remote_dispatch",
