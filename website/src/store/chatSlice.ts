@@ -615,6 +615,20 @@ function closeRefusalCode(err: unknown): string | null {
   }
 }
 
+// Keys whose next close reports its own refusal, so `deleteSlot` raises no
+// sidebar close-refused notice for it. Taken (read and cleared) synchronously
+// when that close starts, so the mark covers exactly one close, including the
+// notice an uncoded refusal raises only after its recovery refetch.
+const callerReportedCloses = new Set<string>()
+
+/** Close `key` as `deleteSlot` does, but leave a refusal to the caller, which
+ *  reports it itself: the follow-up start's kept-session notice says the same
+ *  thing with what to do next, so the sidebar notice would be a second report. */
+export function deleteSlotCallerReported(dispatch: (action: ReturnType<typeof deleteSlot>) => ReturnType<ReturnType<typeof deleteSlot>>, key: string) {
+  callerReportedCloses.add(key)
+  return dispatch(deleteSlot(key))
+}
+
 export const deleteSlot = createAsyncThunk<
   string,
   string,
@@ -627,6 +641,7 @@ export const deleteSlot = createAsyncThunk<
   async (key: string, { dispatch, getState, requestId, fulfillWithValue }) => {
     const root = getState() as RootState
     const deletedSlot = root.dashboard.slots.find(s => s.key === key)
+    const callerReports = callerReportedCloses.delete(key)
     // A new close press retires the last refusal's notice.
     if (root.chat.closeRefused) dispatch({ type: 'chat/setCloseRefused', payload: null })
     // Use the surface key (forward-compat alias for `mode`) so a future
@@ -731,7 +746,9 @@ export const deleteSlot = createAsyncThunk<
       // Uncoded: the server may have popped the key, so only the refetch decides.
       dispatch(releaseCloseHold({ key, requestId, distrustInFlight: uncoded }))
       const recovery = dispatch(fetchSlots())
-      if (uncoded) {
+      if (callerReports) {
+        // The caller shows its own notice for this refusal.
+      } else if (uncoded) {
         const notice = () => dispatch({ type: 'chat/setCloseRefused', payload: { key, title: refusedTitle, reason: 'failed' } })
         const shouldNotice = (readFailed: boolean) => {
           const dashboard = (getState() as RootState).dashboard

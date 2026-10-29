@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { configureStore } from '@reduxjs/toolkit'
-import chatReducer, { deleteSlot, setActiveSlot, sseChatMessage } from '../store/chatSlice'
+import chatReducer, { deleteSlot, deleteSlotCallerReported, setActiveSlot, sseChatMessage } from '../store/chatSlice'
 import dashboardReducer, { fetchSlots, sseSlotPatch, sseSlots } from '../store/dashboardSlice'
 import notificationsReducer from '../store/notificationsSlice'
 import instancesReducer from '../store/instancesSlice'
@@ -81,6 +81,34 @@ describe('an uncoded close failure', () => {
     expect(chat(store).closeRefused).toMatchObject({ key: 'doomed', reason: 'failed' })
     expect(root(store).dashboard.slots.map(s => s.key)).toContain('doomed')
     expect(root(store).dashboard.closingSlots).toEqual({})
+  })
+
+  it('a caller-reported close raises no notice for its own failure, after the recovery read too', async () => {
+    apiMock.deleteChatSlot.mockRejectedValue(new TypeError('Failed to fetch'))
+    apiMock.chatSlots.mockResolvedValue([slotRow('doomed'), slotRow('peer')])
+    const store = makeStore()
+    store.dispatch(sseSlots([slotRow('doomed'), slotRow('peer')]))
+
+    expect((await deleteSlotCallerReported(store.dispatch, 'doomed')).type).toBe('chat/deleteSlot/rejected')
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    // The row still comes back; only the sidebar notice is left to the caller.
+    expect(root(store).dashboard.slots.map(s => s.key)).toContain('doomed')
+    expect(chat(store).closeRefused).toBeNull()
+  })
+
+  it('a caller-reported close covers only that one close', async () => {
+    apiMock.deleteChatSlot.mockRejectedValue(new TypeError('Failed to fetch'))
+    apiMock.chatSlots.mockResolvedValue([slotRow('doomed'), slotRow('peer')])
+    const store = makeStore()
+    store.dispatch(sseSlots([slotRow('doomed'), slotRow('peer')]))
+    await deleteSlotCallerReported(store.dispatch, 'doomed')
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    // A later close the person presses reports its own failure as usual.
+    await store.dispatch(deleteSlot('doomed'))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(chat(store).closeRefused).toMatchObject({ key: 'doomed', reason: 'failed' })
   })
 
   it('reports an uncoded close failure whose recovery list cannot be read', async () => {
