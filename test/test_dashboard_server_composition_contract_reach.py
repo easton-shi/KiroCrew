@@ -784,7 +784,7 @@ _DASHBOARD_BOOT = tuple("""
     _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred
     _deferred _deferred _deferred _deferred _deferred _deferred
     _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred
-    _deferred _deferred _deferred_instances _deferred_instances _deferred_instances _deferred
+    _deferred _deferred _deferred_instances _deferred_instances _deferred_instances _deferred _deferred
     register_all subprocess_executor subprocess_executor subprocess_executor
     subprocess_executor subprocess_executor subprocess_executor _register_deploy_routes
     setup_knowledge_routes setup_weixin_routes setup_feedback_routes
@@ -866,7 +866,7 @@ _API_BOOT = tuple("""
     _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred _deferred
     _deferred _deferred _deferred _deferred _deferred _deferred
     _deferred _deferred _deferred _deferred _deferred _deferred _deferred
-    _deferred _deferred _deferred_instances _deferred_instances _deferred_instances _deferred
+    _deferred _deferred _deferred_instances _deferred_instances _deferred_instances _deferred _deferred
     _register_deploy_routes _register_stt_hooks _register_own_host_warm
     _register_config_watch _register_prevent_sleep_shutdown
     _register_listener_guard_shutdown
@@ -1110,8 +1110,8 @@ def _routes(app: web.Application) -> list[tuple[str, str, str]]:
 #: SHA-256 of the MCP route table's ``"<method> <path> <handler>"`` rows in
 #: registration order, and their count. The table is shared by both entrypoints, so a
 #: route added to it on purpose updates these with it.
-_MCP_TABLE_ROWS = 334
-_MCP_TABLE_DIGEST = "10100ddb02f909444c5888dce627a6e7e21d8712f76f3840e418ada68a242445"
+_MCP_TABLE_ROWS = 335
+_MCP_TABLE_DIGEST = "136f0e1b3b565ab603eca254299e6cf515a47ad0fd86405d7b81e235aa9fd412"
 
 
 def test_the_mcp_route_table_keeps_its_rows_and_order() -> None:
