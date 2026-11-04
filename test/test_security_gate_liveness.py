@@ -682,7 +682,12 @@ def _url_payload_command(n: int) -> str:
 #: Raised by one, from 34,522, for the TickTick consent host in ``exfil_oauth``'s
 #: ``_OAUTH_AUTHORIZATION_ENDPOINTS``: one allowlist entry, no new machinery. Re-measured.
 #: Raised by one, from 34,523, for the Railway consent host in the same set, likewise.
-_PACKAGE_LINE_BUDGET = 34_524
+#: Raised by 107, from 34,524, for ``scan_history`` reading ``sessions/*.jsonl``
+#: (``memory_audit``): the transcript row shapes, the fold of one tool call's rows
+#: by ``tool_call_id``, the non-shell tool kinds, row-time merge across files and
+#: the unreadable-file finding, so ``security audit`` never reports an unread
+#: scan as clean. No check was relaxed.
+_PACKAGE_LINE_BUDGET = 34_631
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
