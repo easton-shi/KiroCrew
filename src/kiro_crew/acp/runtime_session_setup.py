@@ -1004,6 +1004,19 @@ def _copy_native_launch_sources(
     handle.native_context_documents.update(self._native_launch_sources)
 
 
+def _spec_limited_to_wire(spec: Any, wire_servers: Any) -> dict[str, Any]:
+    """*spec* with only the ``mcpServers`` entries the wire array carries."""
+    servers = spec.get("mcpServers") if isinstance(spec, dict) else None
+    if not isinstance(servers, dict):
+        return {}
+    delivered = {
+        entry.get("name")
+        for entry in (wire_servers if isinstance(wire_servers, list) else ())
+        if isinstance(entry, dict)
+    }
+    return {"mcpServers": {name: entry for name, entry in servers.items() if name in delivered}}
+
+
 def _guard_unresolved_mcp_refs(
     self: AcpRuntime,
     handle: AcpSessionHandle,
@@ -1055,12 +1068,16 @@ def _guard_unresolved_mcp_refs(
     except Exception:
         logger.debug("remote-header guard: evaluation failed", exc_info=True)
     try:
-        # The same spec names the servers an unattended run waits for, but
-        # only on kiro-cli: it launches the spec's own servers (via --agent)
-        # and reports each one's start. Elsewhere a spec server may be held
-        # back or never report, and every run would wait out the bound.
+        # The same spec names the servers an unattended run waits for. kiro-cli
+        # launches the spec's own servers (via --agent) and reports each one's
+        # start. KAS starts the servers the wire array carries and reports each
+        # in ``_kiro/mcp/status``, so it waits only for the spec servers the
+        # array delivered: one Crew held back would never report, and every run
+        # would wait out the bound. Other hosts declare nothing.
         if self._expect_mcp_reports and self.acp_backend == ACP_BACKEND_KIRO:
             handle.mcp_session_report().record_declared(spec)
+        elif self._expect_mcp_reports and self.acp_backend == ACP_BACKEND_KAS:
+            handle.mcp_session_report().record_declared(_spec_limited_to_wire(spec, wire_servers))
     except Exception:
         logger.debug("declared MCP servers: spec unreadable", exc_info=True)
 

@@ -112,6 +112,22 @@ def test_the_runtime_records_the_spec_servers_on_a_host_that_reports_them():
     assert handle.mcp_session_report().declared == ("atlassian", "azure-devops")
 
 
+def test_the_kas_runtime_declares_the_spec_servers_its_wire_array_carries():
+    """KAS reports each wire server in ``_kiro/mcp/status``, so a cron waits for
+    them; a spec server Crew held back never reports and is not waited for."""
+    from kiro_crew.acp.runtime import AcpRuntime
+    from kiro_crew.acp.types import ACP_BACKEND_KAS
+
+    rt = AcpRuntime(work_dir="/tmp", acp_backend=ACP_BACKEND_KAS)
+    q = _register(rt, "sA")
+    handle = AcpSessionHandle("sA", q["sA"], rt)
+    handle.mcp_session_report().begin_session([])
+
+    rt._guard_unresolved_mcp_refs(handle, _SPEC, "kirocrew", [{"name": "azure-devops"}])
+
+    assert handle.mcp_session_report().declared == ("azure-devops",)
+
+
 def test_the_runtime_records_nothing_when_it_expects_no_mcp_reports():
     """No frame would ever come, so a wait would only burn the bound."""
     rt, _, _ = _make_runtime()
