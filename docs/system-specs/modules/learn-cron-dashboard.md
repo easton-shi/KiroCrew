@@ -1718,6 +1718,9 @@ Modular aiohttp package at `127.0.0.1:5476` (configurable). Split into:
 - `slot_queue_repository.py` — queued-turn mutation plus the subagent delivery
   ledger, including stable delivery identities, replay recovery, and bounded
   orphan bookkeeping.
+- `queue_edit_hold.py` — the hold a queued card's open editor places on its
+  entry (`POST /api/chat/slots/{slot}/queue/{queue_id}/editing`), and the drain
+  its release starts on an idle slot.
 - `recovery_replays.py` — the slot's recovery-replay ledger (`_ChatSlot.replays`):
   each self-queued replay's queue entry, Stop counts and session binding, the
   drained-alone claim, the entry-gone sweep, the pure revocation rule, and the
@@ -3135,6 +3138,30 @@ lists travel on the `queue_push` frame, the `queue_edit` frame and each slot-det
 them (`chat_delivery.attachment_meta`). `meta` is omitted when the lists are empty.
 On `queue_edit` an absent `meta` means the edit removed every marker, and the client
 drops the row's stale lists.
+
+**An open queue editor holds the queue.** Opening a card's editor posts
+`{"editing": true}` to `/api/chat/slots/{slot}/queue/{queue_id}/editing`, which
+stamps the in-memory entry with `_edit_hold_until` (`queue_edit_hold`, 300 s,
+never persisted). While any entry is held, `_start_next_queued_turn` treats the
+user entries the way the sub-agent hold does (`hold_users`): they stay queued and
+system injections still drain, and `_dequeue_next_system_message` skips the held
+entry itself, so a requeued steer whose card is open waits too. A turn that ends
+mid-edit therefore sends nothing the person is still changing. The PATCH that
+saves the edit releases the hold after storing the text, `{"editing": false}`
+releases it unsaved (the card's cancel, an unchanged or empty commit, the stack
+unmounting, which both hosts force on a session switch by keying `QueueStack`
+by slot), cancelling the held card releases it with the entry, and the
+deadline releases it on its own; each release starts the drain only where
+`idle_slot_admits_drain` admits one, so a slot held for sign-in stays held. A release
+by save, close or cancel starts its drain after `RELEASE_GRACE_SECONDS` (2 s),
+so moving straight to another card's editor, whose hold leaves the browser
+after the first editor's blur released its card, lands that hold first. `useQueuedMessageActions` sends one card's open, save and release one
+after another, so a close never reaches the server before its own open. The
+client sends no release beside a save, since a release that reached the server
+first would drain the old words; a save the server refuses or never receives is
+followed by a release instead. Pinned by
+`test_queue_edit_hold.py` and the `QueueStack editor hold` cases of
+`QueueStack.test.tsx`.
 
 **A steer whose RPC died ambiguously.** When `client.steer()` raises an
 `AcpProcessDied` with `ambiguous_delivery` (a stdin stall with the child alive),

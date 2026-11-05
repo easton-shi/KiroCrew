@@ -36,6 +36,7 @@ from kiro_crew.dashboard.chat_utils import (
     is_system_injection_item,
 )
 from kiro_crew.dashboard.chat_utils_injected_rows import AUTOMATION_STEER_META
+from kiro_crew.dashboard.queue_edit_hold import queue_edit_held
 from kiro_crew.dashboard.recovery_replays import replays_of
 from kiro_crew.dashboard.session_directive_apply import (
     REFUSAL_SELF_WAKE_META_KEY,
@@ -692,8 +693,12 @@ async def _start_next_queued_turn(
     # handed to this tab, or waits in the queue behind another system entry, a
     # user message held for the children must not run ahead of it. The hold still
     # drains system entries, so that completion is what runs next.
+    # A card whose editor is open holds the user entries the same way, so the
+    # drain never sends the words the person is still changing
+    # (``queue_edit_hold``); its save or close starts the drain.
     hold_users = bool(
         (teardown_held and not explicit_request)
+        or (not allow_user_during_subagents and queue_edit_held(slot))
         or (
             not allow_user_during_subagents
             and (
