@@ -58,6 +58,28 @@ def _literal_ancestor_guards(paths: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(guards)
 
 
+def _caller_can_rename(path: str, uid: int) -> bool:
+    """Whether this process, running as *uid*, could rename the entry *path*.
+
+    ``rename(2)`` needs write on the parent, which the parent's owner can grant itself.
+    A parent that cannot be inspected counts as renameable: one pin too many costs a
+    mount, one too few leaves a seal movable.
+    """
+    parent = os.path.dirname(path)
+    try:
+        return os.stat(parent).st_uid == uid or os.access(parent, os.W_OK)
+    except OSError:
+        return True
+
+
+def _renameable_ancestor_guards(paths: tuple[str, ...], uid: int) -> tuple[str, ...]:
+    """The :func:`_literal_ancestor_guards` of *paths* that *uid* could rename.
+
+    A symlink entry is kept: moving the link frees the name as moving a directory does.
+    """
+    return tuple(p for p in _literal_ancestor_guards(paths) if _caller_can_rename(p, uid))
+
+
 def prime_voice_runtime_sandbox_paths() -> str:
     """Cache and create the canonical agent-denied decoder runtime off-loop.
 

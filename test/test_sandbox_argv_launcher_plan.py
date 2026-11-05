@@ -65,6 +65,7 @@ _LINUX_ONLY = pytest.mark.skipif(
 #: The stages ``sandbox_launcher_program.place_masks`` runs.
 _MASK_STAGES = (
     "stage_private_windows",
+    "pin_seal_parents",
     "seal_readonly",
     "mask_sensitive",
     "apply_carveouts",
@@ -97,6 +98,7 @@ def _payload_under(plan: sandbox_plan.ConfinementPlan, root: Path) -> dict:
         "sensitive_dirs",
         "private_dirs",
         "readonly_dirs",
+        "parent_pins",
         "writable_dirs",
         "sensitive_files",
         "required_mask_targets",
@@ -1350,3 +1352,22 @@ class TestHardlinkScanBudget:
             compile(script, "<launcher>", "exec")
         # Each level renders its own program, so the level reaches the plan.
         assert len(set(scripts.values())) == len(scripts)
+
+
+@_POSIX_ONLY
+def test_a_seal_parent_is_pinned_only_when_this_uid_could_rename_it(tmp_path: Path) -> None:
+    uid = os.getuid()
+    assert sandbox_workspace._caller_can_rename(str(tmp_path / "mine"), uid)
+    # A parent that cannot be inspected is pinned rather than left movable.
+    assert sandbox_workspace._caller_can_rename(str(tmp_path / "absent" / "dir"), uid)
+    if uid != 0:
+        assert not sandbox_workspace._caller_can_rename("/usr", uid)
+
+
+@_POSIX_ONLY
+def test_every_namespace_seal_has_its_parent_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandbox_mod, "_caller_can_rename", lambda path, uid: True)
+    plan = sandbox_mod._spawn_plan(sandbox_plan.BACKEND_NAMESPACE, "strict")
+    pins = set(plan.runtime_ancestor_guards)
+    assert plan.readonly
+    assert [seal for seal in plan.readonly if os.path.dirname(seal) not in pins] == []

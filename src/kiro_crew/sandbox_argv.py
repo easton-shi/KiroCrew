@@ -82,6 +82,7 @@ from kiro_crew.sandbox_tiers import (
 )
 from kiro_crew.sandbox_workspace import (
     _literal_ancestor_guards,
+    _renameable_ancestor_guards,
     _voice_runtime_ancestor_guards,
     _voice_runtime_parent_paths,
     _voice_runtime_sandbox_paths,
@@ -343,12 +344,25 @@ def _live_plan_host(request: sandbox_plan.SandboxRequest) -> sandbox_plan.PlanHo
     relocated_crew_readonly = tuple(_relocated_crew_targets(_CREW_READONLY_LEAVES))
     kiro_agents_targets = tuple(_resolved_kiro_agents_targets())
     install_root_targets = tuple(_resolved_install_root_targets())
-    # The namespace launcher binds the package directory itself, so a renamed parent
-    # carries the read-only mount with it; Seatbelt matches paths and needs the guards.
-    install_root_ancestor_guards = (
-        ()
+    # A renamed parent carries a seal away on both backends, so every seal's parents are
+    # guarded in both spellings: Seatbelt denies writing each one, and the namespace
+    # launcher pins the ones this uid could rename. A seal on a link lands on its target,
+    # so the link itself is guarded as a parent is.
+    seal_parents = tuple(
+        spelling if os.path.islink(spelling) else os.path.dirname(spelling)
+        for target in (
+            *voice_runtime_parents,
+            *kiro_agents_targets,
+            *(os.path.join(home, rel) for rel in _CREW_READONLY_TARGETS),
+            *relocated_crew_readonly,
+            *install_root_targets,
+        )
+        for spelling in (os.path.normpath(target), os.path.realpath(target))
+    )
+    readonly_ancestor_guards = (
+        _renameable_ancestor_guards(seal_parents, uid)
         if namespace
-        else _literal_ancestor_guards(tuple(os.path.dirname(t) for t in install_root_targets))
+        else _literal_ancestor_guards(seal_parents)
     )
     carveout_probes = tuple(_carveout_probes(sandbox_plan.carveout_candidates(request)).values())
     host_paths = [
@@ -363,7 +377,7 @@ def _live_plan_host(request: sandbox_plan.SandboxRequest) -> sandbox_plan.PlanHo
         *voice_runtime_ancestor_guards,
         *kiro_agents_targets,
         *install_root_targets,
-        *install_root_ancestor_guards,
+        *readonly_ancestor_guards,
     ]
     return sandbox_plan.PlanHost(
         home=home,
@@ -389,7 +403,7 @@ def _live_plan_host(request: sandbox_plan.SandboxRequest) -> sandbox_plan.PlanHo
         voice_runtime_ancestor_guards=voice_runtime_ancestor_guards,
         kiro_agents_targets=kiro_agents_targets,
         install_root_targets=install_root_targets,
-        install_root_ancestor_guards=install_root_ancestor_guards,
+        readonly_ancestor_guards=readonly_ancestor_guards,
         carveout_probes=carveout_probes,
         uid=uid,
         gid=gid,
