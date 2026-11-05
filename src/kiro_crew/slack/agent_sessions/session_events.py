@@ -60,6 +60,7 @@ from kiro_crew.slack.agent_sessions import fence
 from kiro_crew.slack.agent_sessions.status import clearing_driver, driver_of
 from kiro_crew.slack.channel_policy import channel_refusal
 from kiro_crew.slack.events_inbound import SeenCache
+from kiro_crew.slack.shared_access import prime_shared_user
 
 if TYPE_CHECKING:
     from kiro_crew.slack.gateway import GatewayOrchestrator
@@ -325,6 +326,7 @@ async def handle_stopped(orch: GatewayOrchestrator, event: dict) -> str | None:
     if not _first_delivery(channel, thread_ts or "", str(event.get("event_ts") or "")):
         logger.debug("agent_session_stopped redelivered for %s/%s; ignored", channel, thread_ts)
         return "duplicate"
+    await prime_shared_user(user, orch)
     if not _may_use_bot(user):
         _audit(
             user,
@@ -611,6 +613,7 @@ async def _apply_title_change(
         # A retried rename Slack sent before one already applied here: the newer
         # title stands.
         return "stale"
+    await prime_shared_user(user, orch)
     if not _may_use_bot(user):
         _audit(
             user,

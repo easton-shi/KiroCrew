@@ -37,6 +37,7 @@ if TYPE_CHECKING:
         config_path,
         is_allowed_user,
         is_sensitive_path,
+        is_shared_listed,
         load_window_off_loop,
         logger,
         privacy_mode,
@@ -716,6 +717,23 @@ async def route_linked_thread(
         )
         await slack.post_message(channel, "Not authorized.", reply_ts)
         return LinkedRoute.REFUSED
+
+    # Code channels are the owner's (slack.shared_access): a shared user's reply in
+    # one's anchor thread never reaches its session, whether or not the feature is
+    # still on.
+    if is_shared_listed(user_id):
+        from kiro_crew.slack.code_channels.store import store as _code_channel_store
+
+        if _code_channel_store().get_binding_if_loaded(channel) is not None:
+            sel().log_api_access(
+                caller=user_id,
+                operation="slack.message",
+                outcome="denied",
+                source="slack",
+                resources=f"channel={channel}",
+                error="code channel is owner-only",
+            )
+            return LinkedRoute.REFUSED
 
     # Let bang commands and the bare ``sessions`` keyword fall through to
     # normal handling. The predicate matches the keyword branches exactly

@@ -84,6 +84,7 @@ from kiro_crew.slack.handler import (
     handle_message,
     is_allowed_user,
     is_owner,
+    is_shared_listed,
     link_agent_mismatch,
     read_link_record,
     set_allowed_users,
@@ -107,6 +108,11 @@ from kiro_crew.slack.renderer import (
     split_approval_token,
 )
 from kiro_crew.slack.scope_probe import log_probe_failure, warn_unreadable_tracked_channels
+from kiro_crew.slack.shared_access import (
+    SHARED_OWNER_ONLY_TEXT,
+    prime_shared_user,
+    shared_action_permitted,
+)
 from kiro_crew.start_priority import StartPriority
 
 if TYPE_CHECKING:
@@ -162,7 +168,12 @@ async def dispatch(payload: dict) -> None:
     user_id = payload.get("user", {}).get("id", "")
 
     # ── Access check — deny-by-default ──
-    if not is_allowed_user(user_id):
+    # A shared user (slack.shared_access) reaches only the buttons on their own
+    # work; every other control on a card stays the owner's.
+    await prime_shared_user(user_id, _orch)
+    _allowed = is_allowed_user(user_id)
+    _owner_only = is_shared_listed(user_id) and not shared_action_permitted(action_id)
+    if _owner_only or not _allowed:
         logger.warning(
             "Rejecting interactive payload from unauthorized user %s (action=%s)",
             user_id or "unknown",
@@ -174,12 +185,18 @@ async def dispatch(payload: dict) -> None:
             outcome="denied",
             source="slack",
             resources=action_id,
-            error="unauthorized user",
+            error="owner-only action" if _owner_only else "unauthorized user",
         )
         if _orch and _orch.slack and channel and user_id:
             try:
                 await _orch.slack.post_ephemeral(
-                    channel, user_id, "⛔ You are not authorized to use these buttons."
+                    channel,
+                    user_id,
+                    (
+                        SHARED_OWNER_ONLY_TEXT
+                        if _owner_only
+                        else "⛔ You are not authorized to use these buttons."
+                    ),
                 )
             except Exception:
                 logger.debug("Failed to send ephemeral rejection", exc_info=True)
@@ -558,6 +575,20 @@ async def dispatch(payload: dict) -> None:
         approval_key, press_nonce = split_approval_token(
             action.get("value", "") or action_id.rsplit("_", 1)[-1]
         )
+        # A shared user answers only their own turn's prompt and never grants
+        # Trust; the prompt stays pending for the person it belongs to.
+        if is_shared_listed(user_id) and (
+            is_trust or SlackApprovalDecider.requester_for(approval_key) != user_id
+        ):
+            sel().log_api_access(
+                caller=user_id,
+                operation="slack.transport_tool_approval",
+                outcome="denied",
+                source="slack",
+                resources=f"approval_key={approval_key}",
+                error="trust is owner-only" if is_trust else "not the requester",
+            )
+            return
         # Inbound channels-governance gate: a button press resolves a tool approval
         # (executes the governed tool) or a Trust escalation, so a channels policy
         # that denies ``slack`` must stop it — same gate as an inbound message.
@@ -1002,6 +1033,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.slack.interactions_options import _refuse_stale_options  # noqa: F401
     from kiro_crew.slack.interactions_options import _route_action_to_session  # noqa: F401
     from kiro_crew.slack.interactions_sessions import _clear_session_dismissed  # noqa: F401
+    from kiro_crew.slack.interactions_sessions import _outside_code_channel  # noqa: F401
     from kiro_crew.slack.interactions_sessions import _record_session_dismissed  # noqa: F401
     from kiro_crew.slack.interactions_approvals import _REVIEW_AUTH_DENIED_MSG  # noqa: F401
     from kiro_crew.slack.interactions_approvals import _can_act_on_review_draft  # noqa: F401

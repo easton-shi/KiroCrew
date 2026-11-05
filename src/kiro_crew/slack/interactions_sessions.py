@@ -538,11 +538,29 @@ async def _handle_session_end(
             pass
 
 
+async def _outside_code_channel(channel: str) -> bool:
+    """Whether *channel* has no code-channel binding; False when that cannot be read."""
+    from kiro_crew.slack.code_channels.store import store as _code_channel_store
+
+    try:
+        store = _code_channel_store()
+        binding = await asyncio.to_thread(store.get_binding, channel)
+    except Exception:
+        return False
+    return binding is None and not store.unreadable
+
+
 async def _handle_inline_stop(
     payload: dict, action: dict, channel: str, msg_ts: str, user_id: str
 ) -> None:
-    """Stop the active turn for a session via the inline stop button."""
-    if not is_owner(user_id):
+    """Stop the active turn for a session via the inline stop button.
+
+    The owner, or an admitted shared user (``slack.shared_access``) outside a code
+    channel: code channels stay the owner's.
+    """
+    if not (
+        is_owner(user_id) or (is_allowed_user(user_id) and await _outside_code_channel(channel))
+    ):
         sel().log_api_access(
             caller=user_id,
             operation="slack.inline_stop",

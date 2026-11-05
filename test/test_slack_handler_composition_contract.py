@@ -237,9 +237,10 @@ _SPLIT_HELPERS: dict[str, str] = {
 #: names deleted with the trail (``_add_phase_reaction``, ``_tool_to_phase``), with
 #: ``user_meta`` on ``maybe_route_linked_thread`` (the user row's meta a code
 #: channel passes), ``turn_context`` on it too (a pinned action answer's payload),
-#: and ``post_linked_approval``'s ``thread_ts`` widened to ``str | None`` (a code
-#: channel's own session posts its approval card top-level).
-_BASE_SHAPE_DIGEST = "9c2096ea9679a75df7a69af2454821e3afa1d412ec754742dcaa93f3e311cfea"
+#: ``post_linked_approval``'s ``thread_ts`` widened to ``str | None`` (a code
+#: channel's own session posts its approval card top-level), and ``requester`` on
+#: ``_request_approval`` (the one shared Slack user who may answer the prompt).
+_BASE_SHAPE_DIGEST = "7d39976af3eb5e56616d06861a64a1ef2288fa004bd9b95946b9caa1c2e4341c"
 
 #: Definitions that stay in the facade file, each because a repository guard, a
 #: contract or the import-time body reads it there. The reason per entry is in

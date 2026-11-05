@@ -28,7 +28,13 @@ from kiro_crew.sel import sel
 from kiro_crew.skills import SkillsLoader
 from kiro_crew.slack.blocks import command_hint_block
 from kiro_crew.slack.events_slash import SLASH_REGISTRY
-from kiro_crew.slack.handler import is_allowed_user, is_owner, is_yolo_mode, slack_cfg
+from kiro_crew.slack.handler import (
+    is_allowed_user,
+    is_owner,
+    is_shared_listed,
+    is_yolo_mode,
+    slack_cfg,
+)
 from kiro_crew.slack.sessions_view import (
     _HOME_TAB_SESSIONS_PER_KIND,
     _SESSION_KIND_DASHBOARD,
@@ -213,7 +219,7 @@ async def _publish_home_tab(orch: GatewayOrchestrator, user_id: str) -> None:
         # the security-controls rule (deny-by-default) and protects
         # against future refactors that bypass the dispatcher gate. Mirrors
         # the slash-command pattern at events._handle_sessions.
-        if not (is_owner(user_id) or is_allowed_user(user_id)):
+        if not (is_owner(user_id) or is_allowed_user(user_id)) or is_shared_listed(user_id):
             sel().log_api_access(
                 caller=user_id,
                 operation="slack.home_tab_sessions_data_access",

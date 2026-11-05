@@ -170,6 +170,57 @@ async def test_multi_step_mention_moves_into_a_new_channel(env: Env) -> None:
     assert env.routed and env.routed[0][0] == "C0NEW"
 
 
+async def _route_shared(env: Env, event: dict[str, Any], *, is_mention: bool) -> MagicMock:
+    """:func:`_route` for a shared user (``slack.shared_access``): admitted, not the owner."""
+    with (
+        patch("kiro_crew.slack.events.is_shared_listed", return_value=True),
+        patch("kiro_crew.slack.handler.is_shared_listed", return_value=True),
+    ):
+        return await _route(env, event, is_mention=is_mention)
+
+
+async def test_a_shared_user_is_refused_in_a_bound_code_channel(env: Env) -> None:
+    _bind(env)
+    handle = await _route_shared(env, _plain("C0CODE"), is_mention=False)
+    handle.assert_not_called()
+    assert env.routed == []
+    # Quietly: a member's messages are mostly not for the bot.
+    assert env.slack.ephemerals == [] and env.slack.posts == []
+
+
+async def test_a_shared_user_cannot_answer_a_card_in_a_code_channel(env: Env) -> None:
+    from kiro_crew.slack.code_channels.routing import options_answer_permitted
+
+    _bind(env)
+    assert options_answer_permitted("C0CODE", OWNER) is True
+    with patch("kiro_crew.slack.handler.is_shared_listed", return_value=True):
+        assert options_answer_permitted("C0CODE", OWNER) is False
+
+
+async def test_the_code_channel_gate_itself_drops_a_shared_user(env: Env) -> None:
+    from kiro_crew.slack.code_channels.routing import DROP, inbound_gate
+
+    _bind(env)
+    with patch("kiro_crew.slack.handler.is_shared_listed", return_value=True):
+        result = await inbound_gate(
+            _orch(env),
+            _plain("C0CODE"),
+            text="now add a regression test",
+            sender_id=OWNER,
+            authorized=False,
+            from_trusted_bot=False,
+        )
+    assert result is DROP and env.routed == []
+
+
+async def test_a_shared_users_mention_never_opens_a_code_channel(env: Env) -> None:
+    env.api.responses["agents.conversations.create"] = {"ok": True, "channel_id": "C0NEW"}
+    handle = await _route_shared(env, mention(), is_mention=True)
+    # Answered in place on the normal path, as without code channels.
+    handle.assert_called_once()
+    assert env.store.get_binding("C0NEW") is None and env.routed == []
+
+
 async def test_one_line_question_is_answered_in_place(env: Env) -> None:
     env.decision = RouteDecision("stay")
     handle = await _route(

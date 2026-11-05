@@ -41,7 +41,13 @@ from kiro_crew.sel import sel
 from kiro_crew.slack.allowlist import prompt_track_channel, send_dashboard_link
 from kiro_crew.slack.blocks import channels_modal, dashboard_link_block, voice_config_modal
 from kiro_crew.slack.events_queue import _spawn_tracked
-from kiro_crew.slack.handler import describe_grant_lifetime, is_allowed_user, is_owner, slack_cfg
+from kiro_crew.slack.handler import (
+    describe_grant_lifetime,
+    is_allowed_user,
+    is_owner,
+    is_shared_listed,
+    slack_cfg,
+)
 from kiro_crew.slack.sessions_view import (
     _build_sessions_blocks,
     _collect_recent_sessions_off_loop,
@@ -474,7 +480,7 @@ async def _handle_sessions(
     # protects against future refactors that bypass the dispatcher gate.
     # The ``sessions`` keyword path applies the same check in handler_runtime/dispatch.py
     # before delegating to ``_handle_sessions_command``.
-    if not (is_owner(caller_id) or is_allowed_user(caller_id)):
+    if not (is_owner(caller_id) or is_allowed_user(caller_id)) or is_shared_listed(caller_id):
         sel().log_api_access(
             caller=caller_id,
             operation="slack.sessions_slash_data_access",
@@ -747,7 +753,7 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
                 fix,
             )
             # Only the owner can make the fix, so only the owner is told.
-            if is_allowed_user(caller_id):
+            if is_allowed_user(caller_id) and not is_shared_listed(caller_id):
                 _spawn(
                     _respond(
                         f"⚠️ Kiro Crew is set up for `{slash_command}`, so `{cmd}` did "
@@ -756,8 +762,9 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
                 )
         return
 
-    # Deny-by-default — only allowed users can invoke slash commands
-    if not is_allowed_user(caller_id):
+    # Deny-by-default — only the owner can invoke slash commands (a shared user,
+    # slack.shared_access, drives work by message, never through the slash command)
+    if not is_allowed_user(caller_id) or is_shared_listed(caller_id):
         sel().log_api_access(
             caller=caller_id,
             operation="slack.slash_command",

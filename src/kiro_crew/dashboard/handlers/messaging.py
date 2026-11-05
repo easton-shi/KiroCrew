@@ -598,7 +598,11 @@ async def api_send_message(request: web.Request) -> web.Response:
     Slack target and the origin-session injection stay here.
     """
     from kiro_crew.security import redact_credentials, redact_exfiltration_urls  # noqa: F811
-    from kiro_crew.slack.handler import is_allowed_user, is_tracked_channel  # noqa: F811
+    from kiro_crew.slack.handler import (  # noqa: F811
+        is_allowed_user,
+        is_shared_listed,
+        is_tracked_channel,
+    )
     from kiro_crew.validation import USER_ID_RE  # noqa: F811
 
     state: DashboardState = request.app["state"]
@@ -670,7 +674,9 @@ async def api_send_message(request: web.Request) -> web.Response:
             status=403,
         )
 
-    if target_user and not is_allowed_user(target_user):
+    # Owner-only: sharing the bot (slack.shared_access) never lets the agent DM a
+    # shared user unasked.
+    if target_user and not (is_allowed_user(target_user) and not is_shared_listed(target_user)):
         _sel().log_tool_invocation(
             session_key="dashboard",
             tool_name="send_message",

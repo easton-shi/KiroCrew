@@ -32,7 +32,7 @@ from kiro_crew.dashboard.origin import (
 from kiro_crew.dashboard.token_auth import LINK_WINDOW_SECS, MAX_SESSION_TTL_SECS, generate_token
 from kiro_crew.dashboard.urls import slack_tunnel_opt_in, tunnel_origin_if_opted_in
 from kiro_crew.sel import sel
-from kiro_crew.slack.handler import is_allowed_user, is_tracked_channel
+from kiro_crew.slack.handler import is_allowed_user, is_shared_listed, is_tracked_channel
 from kiro_crew.tunnel import get_tunnel_url, publish_disabled
 
 if TYPE_CHECKING:
@@ -108,7 +108,8 @@ async def prompt_allowlist(
     if not user_id:
         return
 
-    already = is_allowed_user(user_id)
+    # A shared-access person (slack.shared_access) is not on this allowlist.
+    already = is_allowed_user(user_id) and not is_shared_listed(user_id)
 
     # Automatic channel-join → skip if already allowed
     if channel_id and already:

@@ -264,9 +264,10 @@ async def api_slack_profile(request: web.Request) -> web.Response:
     user_id = redact(user_id)
 
     # Authorization first (deny-by-default) — reject before any side effects
-    from kiro_crew.slack.handler import is_allowed_user  # noqa: F811
+    from kiro_crew.slack.handler import is_allowed_user, is_shared_listed  # noqa: F811
 
-    if not is_allowed_user(user_id):
+    # Owner-only: a slack.shared_access person's profile is not read here.
+    if not is_allowed_user(user_id) or is_shared_listed(user_id):
         _sel().log_tool_invocation(
             session_key="dashboard",
             tool_name="read_slack_profile",
