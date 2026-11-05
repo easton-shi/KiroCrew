@@ -235,6 +235,23 @@ class TestSuccess:
         assert "channels" not in doc
         assert governance.parse_policy(doc) is not None
 
+    def test_disabled_keeps_the_low_risk_capabilities_and_dev_mode_off(
+        self, enterprise, vault, cps
+    ):
+        """RFC D3: open with the policy silent; dev mode stays off."""
+        vault()
+        cps.reply = json.dumps({"enterpriseManagementStatus": "DISABLED"}).encode()
+        ceiling = governance.parse_policy(json.loads(epf.fetch(_request()).body))
+        for scope in (
+            "capabilities.memory_writes",
+            "capabilities.theme_persona",
+            "capabilities.milestones",
+            "capabilities.decisions_local",
+        ):
+            assert governance.resolve(ceiling, None, scope, "").permitted, scope
+        assert not governance.resolve(ceiling, None, "capabilities.app_dev_mode", "").permitted
+        assert not governance.resolve(ceiling, None, "capabilities.decisions", "").permitted
+
 
 _DISABLED = json.dumps({"enterpriseManagementStatus": "DISABLED"}).encode()
 
@@ -717,15 +734,20 @@ def _translate(*rules: str) -> dict:
     return t.translate("rules:\n" + "".join(f"  - {r}\n" for r in rules))
 
 
-class TestSwitchRows:
-    """The on/off policy capabilities ``messaging`` and ``cron`` land as ``{"enabled": bool}``."""
+# The on/off policy capabilities. ``memory_writes`` and ``theme_persona`` are open
+# controls (RFC D3): a remote deny must still turn them off.
+_SWITCHES = ["messaging", "cron", "memory_writes", "theme_persona"]
 
-    @pytest.mark.parametrize("capability", ["messaging", "cron"])
+
+class TestSwitchRows:
+    """The on/off policy capabilities land as ``{"enabled": bool}``."""
+
+    @pytest.mark.parametrize("capability", _SWITCHES)
     def test_allow_turns_it_on(self, capability):
         doc = _translate(f"{{capability: {capability}, effect: allow}}")
         assert doc["capabilities"] == {capability: {"enabled": True}}
 
-    @pytest.mark.parametrize("capability", ["messaging", "cron"])
+    @pytest.mark.parametrize("capability", _SWITCHES)
     def test_deny_all_turns_it_off(self, capability):
         doc = _translate(
             f"{{capability: {capability}, effect: allow}}",
@@ -733,11 +755,11 @@ class TestSwitchRows:
         )
         assert doc["capabilities"] == {capability: {"enabled": False}}
 
-    @pytest.mark.parametrize("capability", ["messaging", "cron"])
+    @pytest.mark.parametrize("capability", _SWITCHES)
     def test_unnamed_keeps_the_baseline(self, capability):
         assert "capabilities" not in _translate("{capability: shell, effect: allow}")
 
-    @pytest.mark.parametrize("capability", ["messaging", "cron"])
+    @pytest.mark.parametrize("capability", _SWITCHES)
     def test_ask_reads_as_deny(self, capability):
         doc = _translate(
             f"{{capability: {capability}, effect: allow}}",
@@ -747,7 +769,7 @@ class TestSwitchRows:
 
     @pytest.mark.parametrize("effect", ["allow", "deny"])
     @pytest.mark.parametrize("extra", ["exclude: [x]", "match: [x]", "when: 'client == \"crew\"'"])
-    @pytest.mark.parametrize("capability", ["messaging", "cron"])
+    @pytest.mark.parametrize("capability", _SWITCHES)
     def test_an_unknown_shape_turns_it_off(self, capability, extra, effect):
         """The binary grant shape is unconfirmed: a shape not known here turns it off.
 
@@ -759,6 +781,14 @@ class TestSwitchRows:
             f"{{capability: {capability}, effect: {effect}, {extra}}}",
         )
         assert doc["capabilities"] == {capability: {"enabled": False}}
+
+    @pytest.mark.parametrize("capability", ["memory_writes", "theme_persona"])
+    def test_a_remote_deny_closes_an_open_control_in_an_enterprise_build(
+        self, enterprise, capability
+    ):
+        doc = _translate(f"{{capability: {capability}, effect: deny}}")
+        ceiling = governance.parse_policy(doc)
+        assert not governance.resolve(ceiling, None, f"capabilities.{capability}", "").permitted
 
     def test_an_unknown_cron_shape_denies_in_an_enterprise_build(self, enterprise):
         """End to end: an unconditional cron deny beside a conditional allow stays a deny."""

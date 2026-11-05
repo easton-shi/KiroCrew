@@ -73,6 +73,10 @@ MANAGED: Mapping[str, Managed] = MappingProxyType(
         "messaging_channel": Managed(("channels", "members")),
         "messaging": Managed(("capabilities", "messaging"), SWITCH),
         "cron": Managed(("capabilities", "cron"), SWITCH),
+        # Open controls (RFC D3) under their appendix policy terms, so a
+        # remote deny still turns them off; unnamed, they keep Crew's default.
+        "memory_writes": Managed(("capabilities", "memory_writes"), SWITCH),
+        "theme_persona": Managed(("capabilities", "theme_persona"), SWITCH),
         "permission_mode": Managed(
             ("approval_modes",), floor=SCOPE_CATALOG["approval_modes"].always_permitted
         ),
