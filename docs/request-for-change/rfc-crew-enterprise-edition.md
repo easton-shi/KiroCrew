@@ -7,14 +7,14 @@ last-audited: 2026-10-29
 audited-at: a7ecdf3f1
 doc-pr: null
 implementation-prs: []
-tracking-issues: [23206, 28751, 30178]
+tracking-issues: [23206, 28751, 30178, 30821]
 supersedes: []
 superseded-by: []
 ---
 
 # RFC: Crew Enterprise Edition
 
-- Status: accepted. The owner approved this design on 2026-10-23; D1 to D7 in section 5 are owner decisions (D4 and D5 added 2026-10-29, D3 amended and D6 added 2026-11-02, D7 added 2026-11-05). This document landed first so the implementation pull requests that follow have a design for the First Principles and Design lanes to check against: the enterprise edition changes defaults (most governable features off) and adds a startup gate.
+- Status: accepted. The owner approved this design on 2026-10-23; D1 to D8 in section 5 are owner decisions (D4 and D5 added 2026-10-29, D3 amended and D6 added 2026-11-02, D7 and D8 added 2026-11-05). This document landed first so the implementation pull requests that follow have a design for the First Principles and Design lanes to check against: the enterprise edition changes defaults (most governable features off) and adds a startup gate.
 - Tracking issue: [#23206](https://github.com/kirodotdev/KiroCrew/issues/23206)
 - Related: [rfc-central-governance-ceiling](rfc-central-governance-ceiling.md) (the policy ceiling this edition fetches and enforces), [platform-context](../system-specs/modules/platform-context.md) (the existing edition seam), [governance](../system-specs/modules/governance.md) (the evaluator and catalog this edition tightens)
 
@@ -84,8 +84,8 @@ In the enterprise edition, most governable features are off by default, or keep 
 
 | Class | Count | Enterprise behaviour |
 |---|---|---|
-| Green | 34 | Off by default; governance turns it on. MCP servers, scheduled jobs, Crew apps and sub-agents keep Crew's default; governance turns them off. The minimum sandbox level keeps Crew's sandbox default; governance can only make it stricter (D7) |
-| Yellow | 20 | Off by default. Until the Crew work lands, minimal set only. Tools, shell commands and file read / write keep Crew's default; governance turns them off |
+| Green | 37 | Off by default; governance turns it on. MCP servers, scheduled jobs, Crew apps, sub-agents, shell commands and file read / write keep Crew's default; governance turns them off. The minimum sandbox level keeps Crew's sandbox default; governance can only make it stricter (D7) |
+| Yellow | 17 | Off by default. Until the Crew work lands, minimal set only. Tools keep Crew's default; governance turns them off |
 | Red | 12 | Governance cannot control it; hardcoded to the minimal set |
 | Local floor | 2 | Always on; see below |
 
@@ -152,6 +152,10 @@ The owner added D7 on 2026-11-05 (see the decision log below).
 
 **D7. The sandbox level can only be tightened.** In an enterprise build, Crew reads the setting `crew_sandbox_min_level` from the configuration entries of the governance reply (`body.configuration`), beside the policy. When the reply carries `manifest.hash`, the same check covers the configuration entries and the policy. Crew parses the entries on every `ENABLED` reply, with or without a hash, and a badly shaped entry refuses the whole reply. The levels, loosest to strictest, are `off`, `standard`, `cc` and `strict`. The effective level is the stricter of the local level and the policy level, so the policy can only tighten and never loosen. Only `cc` and `strict` set Crew's existing sandbox floor, `sandbox.min_level`. A policy `off` or `standard` sets no floor, the same as when the reply does not carry the setting: Crew's own default (`auto`) already resolves to `standard`, and an enterprise build already reads a local `off` as that default, so neither value has any effect and no policy can make an enterprise build run unsandboxed. This matters because the sandbox enforcer treats any floor as a governed host (it turns off the first-party no-backend carve-out, and a floor of `standard` or above overrides the unsandboxed-exec allowance); a floor that adds nothing must not do that. A value that is not one of the four levels applies the strictest level, `strict`, and logs a warning; on a host with no sandbox backend, spawns are then refused. The setting is kept with the cached policy document, so an `UNCHANGED` reply, a refresh and a cache-only child keep it. Local config can still pick a stricter level (D3). The `oss` edition is unchanged.
 
+The owner added D8 on 2026-11-05 (see the decision log below).
+
+**D8. Crew reads the policy terms that already exist.** In an enterprise build, Crew reads these existing policy-language terms from the governance reply, with no change to the language: `shell` (to `commands`), `fs_read` and `fs_write` (to `filesystem.read` and `filesystem.write`), `network_egress` (to `network.egress`), `mcp` (to `mcp`), `subagent` with its agent names (to `capabilities.spawn` and its `agents` list), beside `messaging_channel`, `messaging`, `cron` and `permission_mode`, which it already reads. It also reads the on/off terms `tailnet_origin`, `browser_use` and `theme_install` (to `capabilities.tailnet_origin`, `capabilities.browse` and `capabilities.theme_install`). A rule on `builtin` or `filesystem` reaches the terms beneath it. A deny on `all` reaches every term above; an allow on `all` reaches only the built-in tools and `mcp`, the stricter reading. A term that any rule names is governed as the language reads it: what no `allow` grants is denied. A term no rule names keeps the D3 default. Tighten-only stays the rule against Crew's own protections: no rule can widen past the local floor (`~/.aws`, `~/.ssh`, no self-disable), which Crew checks before any rule. Each value is converted to the form Crew's matcher reads. A value Crew cannot match exactly is dropped from what a rule allows and widened in what a rule denies; a denied value Crew cannot widen safely refuses the whole reply, as an untranslatable rule does today. The term `skill` is not read: Crew has no control that gates loading a skill by name. Slack channel ids are not read: the language's `channelId` names a chat service, not a channel. The `oss` edition is unchanged.
+
 **Decision log.**
 
 - 2026-10-28: the owner amended D1's consequence. Why it changes: (1) on 2026-10-23 D1 made a missing companion fail closed because the governance fetch was then planned to live in a companion package; (2) on 2026-10-27 the owner moved the control-plane policy fetch into this repository, reusing the existing control-plane client, and it merged as [#24661](https://github.com/kirodotdev/KiroCrew/pull/24661); (3) every enterprise gate (the login gate, the policy fetch that exits on failure, deny-unnamed, local-only-stricter and the edition locks) now lives in the core behind the build-time `EDITION`, so a companion supplies nothing the enterprise edition needs and the D1 refusal only stops enterprise builds from starting. New consequence: an enterprise build with no companion boots on the core defaults with every enterprise gate on. What does not change: a host with a companion installed takes the same path as before; a broken, rejected, ambiguous or contract-mismatched companion still fails closed with `PlatformCompositionError`; no environment variable or config changes the profile or the edition; the `oss` edition is unchanged.
@@ -162,6 +166,7 @@ The owner added D7 on 2026-11-05 (see the decision log below).
 
 - 2026-11-02: the owner added D6. Why it changes: (1) on a real enterprise desktop build with no policy reply, Settings > Agent Harness left only Kiro CLI, because the appendix "Agent harness" minimal set was `kiro` and the `agent_backend` floor is the Kiro CLI harness; (2) KAS is the forward harness and kiro-cli is being retired, so the one harness an enterprise build keeps must be KAS. New consequence: in an enterprise build the minimal set and the floor are KAS; the Kiro CLI harness needs a remote rule; a KAS proven unable to start on its route exits naming the fix instead of falling back. What does not change: kiro-cli stays usable as KAS's relay, beside the engine bundle route; a remote rule can still widen the set; D1 to D5, including D3 as amended the same day (D6 changes only the `agent_backend` row's minimal set, which D3's amendment did not open); the `oss` edition, whose floor stays the Kiro CLI harness. Delivery: the code change follows this record in its own pull request.
 - 2026-11-05: the owner added D7. Why it changes: the governance reply carries settings (`body.configuration`) as well as the policy, and Crew read the settings only to check the reply's hash, so a published `crew_sandbox_min_level` had no effect; the appendix kept "Minimum sandbox level" in Red, with no policy term. New consequence: "Minimum sandbox level" moves from Red to Green with the policy term `crew_sandbox_min_level`; the effective level is the stricter of the local and the policy level; the policy can only tighten; only `cc` and `strict` set the floor, and `off` or `standard` set none, the same as a missing setting, which keeps Crew's sandbox default; a value that is not a known level applies `strict`. What does not change: no policy can loosen the sandbox or turn it off; D1 to D6; the local floor; the `oss` edition. Delivery: the code change follows this record in its own pull request.
+- 2026-11-05: the owner added D8. Why it changes: the language already has terms for shell commands, file read and write, reachable hosts, MCP servers and sub-agents, and Crew read none of them, so an organisation's rules for them had no effect on Crew; three on/off terms (`tailnet_origin`, `browser_use`, `theme_install`) are being added to the language for Crew. New consequence: "Shell commands", "File read / write" and "Reachable hosts" move from Yellow to Green, with the terms `shell`, `fs_read` / `fs_write` and `network_egress`; Crew reads those and `mcp` and `subagent`, and the three on/off terms. What does not change: D3's defaults when no rule names a term; the local floor; Slack channel ids and project skills stay as they are; the `oss` edition. Delivery: one pull request with this record and the code (issue #30821).
 
 ### 6. Changes
 
@@ -181,6 +186,7 @@ The owner added D7 on 2026-11-05 (see the decision log below).
 | Local config, env, profile and dashboard settings readers | Enterprise build lets them narrow a control, never widen it (D3) |
 | `agent_backend` floor and baseline | Enterprise build keeps KAS as the harness no policy can remove and the baseline minimal set; a KAS proven unable to start on its route exits naming the fix (D6). `oss` keeps the Kiro CLI floor |
 | `src/kiro_crew/platform/enterprise_policy_fetch.py`, `src/kiro_crew/platform/enterprise_policy_translate.py` | Enterprise build passes the reply's configuration entries to the translator, which turns `crew_sandbox_min_level` `cc` or `strict` (and a value that is not a known level, as `strict`) into `sandbox.min_level`, tighten-only, kept with the cached document (D7) |
+| `src/kiro_crew/platform/enterprise_policy_translate.py` | Reads the existing terms `shell`, `fs_read`, `fs_write`, `network_egress`, `mcp` and `subagent`, and the on/off `tailnet_origin`, `browser_use` and `theme_install`; a meta-capability rule reaches the terms beneath it, read the stricter way for `all` (D8) |
 | Features Crew has no key for yet | Enterprise edition reads `EDITION` at the feature entry and turns it off |
 | `Makefile` | Add the `EDITION=enterprise` build |
 
@@ -225,7 +231,7 @@ How deny-unnamed keeps each control's minimal set was open in the first draft; D
 
 "Crew default" (amended 2026-11-02, D3): an open control. When no rule names it, it keeps Crew's normal default, as in the `oss` edition; a rule can narrow it or turn it off. The local floor still applies, and so does the approval prompt under the default `normal` mode (`trust` and `trust_reads` stay selectable; see section 3).
 
-### Green (34)
+### Green (37)
 
 | Control | Policy term | Crew key | In Crew | Enterprise default | Minimal set |
 |---|---|---|---|---|---|
@@ -240,7 +246,7 @@ How deny-unnamed keeps each control's minimal set was open in the first draft; D
 | Deploy regions | `cloud_deploy` | `publish.regions` | no | off | — |
 | Browser | `browser_use` | `capabilities.browse` | yes | off | — |
 | Phone pairing | `mobile_connect` | `capabilities.mobile_connect` | yes | off | — |
-| Tailscale access | `remote_connect` | `capabilities.tailnet_origin` | yes | off | — |
+| Tailscale access | `tailnet_origin` | `capabilities.tailnet_origin` | yes | off | — |
 | Allowed tailnets | `crew_remote_tailnets` | `tailnet_origin.tailnets` | no | off | — |
 | Durable memory writes | `memory_writes` | `capabilities.memory_writes` | yes | off | — |
 | Scheduled jobs | `cron` | `capabilities.cron` | yes | Crew default | Crew default |
@@ -263,15 +269,15 @@ How deny-unnamed keeps each control's minimal set was open in the first draft; D
 | Minimum version | `crew_update_min_version` | `updates.min_version` | yes | not set | — |
 | Update channel | `crew_update_channel` | `updates.channel` | no | stable | stable |
 | Minimum sandbox level | `crew_sandbox_min_level` (configuration entry) | `sandbox.min_level` | yes | Crew's sandbox default; a policy can only make it stricter (D7) | Crew's sandbox default |
+| Shell commands | `shell` | `commands` | yes | Crew default; under `normal` a command that is not read-only asks unless a grant covers it (section 3) | Crew default |
+| File read / write | `fs_read` / `fs_write` | `filesystem.read` / `write` | yes | Crew default; under `normal` each write asks unless a grant covers it (section 3); local floor stays (D8) | Crew default |
+| Reachable hosts | `network_egress` | `network.egress` | yes | off | — |
 
-### Yellow (20)
+### Yellow (17)
 
 | Control | Policy term | Crew key | In Crew | Enterprise default | Minimal set |
 |---|---|---|---|---|---|
 | Tools | `tool` | `tools` | yes | Crew default | Crew default |
-| Shell commands | `shell` | `commands` | yes | Crew default; under `normal` a command that is not read-only asks unless a grant covers it (section 3) | Crew default |
-| File read / write | `fs_read` / `fs_write` | `filesystem.read` / `write` | yes | Crew default; under `normal` each write asks unless a grant covers it (section 3); local floor stays | Crew default |
-| Reachable hosts | `web_fetch` | `network.egress` | yes | off | — |
 | Extension install | `extension_install` | `capability_install` | no | off | — |
 | Extension sources | `crew_extension_registry_hosts` / `_local_sources` | `external_access.registry_hosts` | no | off | — |
 | Extension publishers | `crew_extension_publishers` | `capability_install.publishers` | no | off | — |

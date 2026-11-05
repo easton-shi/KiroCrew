@@ -547,16 +547,28 @@ in an oss build). One fetch is the Kiro control plane's
   host, and the reply's `manifest.hash` (SHA-256 of the body) when it carries one.
   There is no signature layer.
 - **Answer.** `ENABLED` carries Trust V2 YAML, which
-  `platform/enterprise_policy_translate.py` turns into a Crew document (today
-  `messaging_channel` to `channels.members`, `permission_mode` to `approval_modes`
-  with its floor kept, and the on/off `messaging` and `cron` to
-  `capabilities.messaging` and `capabilities.cron`), re-read every 300 s. An on/off
-  capability is off on any deny or on a rule shape it does not know (`match`,
+  `platform/enterprise_policy_translate.py` turns into a Crew document, re-read
+  every 300 s. Its `MANAGED` rows: `messaging_channel` to `channels.members`,
+  `permission_mode` to `approval_modes` with its floor kept, `shell` to `commands`,
+  `fs_read` / `fs_write` to `filesystem.read` / `filesystem.write`, `network_egress`
+  to `network.egress`, `mcp` to `mcp`, `subagent` to `capabilities.spawn` (its
+  `agents` list), and the on/off `messaging`, `cron`, `tailnet_origin`,
+  `browser_use` and `theme_install` to `capabilities.messaging`, `.cron`,
+  `.tailnet_origin`, `.browse` and `.theme_install`. A rule on a meta-capability
+  (`all`, `builtin`, `filesystem`) reaches the managed capabilities beneath it in
+  `acp/kas_permissions.py` `META_CAPABILITY_EXPANSION`; a deny on `all` reaches
+  every managed capability, the stricter reading. An
+  on/off capability is off on any deny or on a rule shape it does not know (`match`,
   `exclude` or `when`), on on an allow with no deny, and unnamed (baseline) with no
   rule. A shape it does not know is off, not unnamed, because `capabilities.cron`
-  is an open control: unnamed, it keeps Crew's default. For a capability with a
-  resource, only a deny `exclude` grants anything; a lone deny `match` leaves the capability unnamed, so the
-  baseline keeps it off. The reply's configuration entries (`body.configuration`)
+  is an open control: unnamed, it keeps Crew's default. A capability with a resource
+  that any rule names is governed, as the policy language reads it: a deny `exclude`
+  or an allow `match` says what is allowed, an allow with no `match` allows everything
+  but the deny `match` entries (a deny-list), and nothing granted allows nothing. Each
+  row converts a pattern into its Crew matcher's form: a pattern with no exact form is
+  dropped from an allowed set and widened in a denied one (a relative file glob
+  matches in any directory, a file deny matches either case, an MCP tool glob covers
+  its whole server), and a deny that cannot be widened refuses the policy. The reply's configuration entries (`body.configuration`)
   are read only for the hash today; RFC D7 (added 2026-11-05) makes Crew apply
   `crew_sandbox_min_level` to `sandbox.min_level`, tighten-only, and that change
   is pending in #30178. `DISABLED` answers
