@@ -1037,7 +1037,7 @@ async def test_rc4_a_pr_after_a_line_break_in_the_transcript_counts_as_named(mon
 
 
 @pytest.mark.asyncio
-async def test_rc4_a_pr_from_the_original_request_passes_the_check(monkeypatch):
+async def test_rc4_a_pr_from_the_original_request_is_no_miss(monkeypatch):
     # "asked" falls back to the original request, which may sit outside the payload.
     state = _State()
     slot = _foreground_slot(state)
@@ -1050,8 +1050,9 @@ async def test_rc4_a_pr_from_the_original_request_passes_the_check(monkeypatch):
     monkeypatch.setattr(warm_task_brief, "_payload", lambda *a, **k: {"goal": "ship"})
     await warm_task_brief._prepare_warm_task_brief(state, slot)
     row = slot.rows[-1]
+    # A card brief keeps no "asked" line, and the request's PR is no miss.
     assert row["meta"]["kind"] == "warm_task_brief_result"
-    assert "#7" in row["meta"]["brief"]["asked"]
+    assert "grounding_miss" not in row["meta"] and "asked" not in row["meta"]["brief"]
 
 
 def test_rc4_a_live_merged_pr_is_not_a_change_since_away():
@@ -1086,7 +1087,7 @@ def test_rc4_a_hex_colour_or_a_capped_number_names_no_pr():
 
 
 @pytest.mark.asyncio
-async def test_rc4_a_capped_asked_fallback_does_not_fail_the_result(monkeypatch):
+async def test_rc4_a_long_request_does_not_fail_a_card_brief(monkeypatch):
     state = _State()
     slot = _foreground_slot(state)
     request = "x" * (warm_task_brief._MAX_ASKED_CHARS - 6) + " #26100 and more"
@@ -1099,6 +1100,6 @@ async def test_rc4_a_capped_asked_fallback_does_not_fail_the_result(monkeypatch)
     monkeypatch.setattr(warm_task_brief, "_payload", lambda *a, **k: {"goal": "ship"})
     await warm_task_brief._prepare_warm_task_brief(state, slot)
     row = slot.rows[-1]
-    # The cap cut the number: what is left names no PR the input lacks.
-    assert row["meta"]["brief"]["asked"].endswith("#261…")
-    assert row["meta"]["kind"] == "warm_task_brief_result"
+    # A card brief draws no "asked" fallback, so the long request cannot fail it.
+    assert "asked" not in row["meta"]["brief"]
+    assert row["meta"]["kind"] == "warm_task_brief_result" and "grounding_miss" not in row["meta"]
