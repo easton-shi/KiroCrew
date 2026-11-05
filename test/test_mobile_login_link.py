@@ -98,10 +98,10 @@ def test_mobile_link_refuses_app_scoped_token():
     response = _call(_request(app="calendar", dashboard_url="https://dashboard.example"))
 
     assert response.status == 403
-    assert json.loads(response.text) == {
-        "error": "app_token_forbidden",
-        "code": "app_token_forbidden",
-    }
+    body = json.loads(response.text)
+    assert body["code"] == "app_token_forbidden"
+    assert body["error"].startswith("App tokens cannot mint a mobile sign-in link,")
+    assert "no permission in app.json lets an app token do this" in body["error"]
 
 
 def test_mobile_link_requires_an_authenticated_dashboard_session():
