@@ -82,6 +82,7 @@ from kiro_crew.acp.kas_permissions import (
     CREW_ANSWERED_BUILTINS_KEY,
     CREW_ANSWERED_COMMANDS_KEY,
     CREW_SHELL_ALLOWLIST_KEY,
+    CREW_UNCARRIED_DENIES_KEY,
     CREW_WRITE_ALLOWLIST_KEY,
     HOOK_GATEABLE_CAPABILITIES,
     allowed_tools_to_permissions,
@@ -97,6 +98,8 @@ from kiro_crew.acp.kas_permissions import (
     without_allowed_commands,
 )
 from kiro_crew.acp.kas_prompt_paths import is_unsafe_prompt_path as _is_unsafe_prompt_path
+from kiro_crew.acp.kas_skill_scope_summary import _skill_scope_summary
+from kiro_crew.acp.kas_spec_denies import uncarried_shell_denies
 from kiro_crew.acp.kas_tool_limits import (
     _KAS_CARRIED_ELSEWHERE,
     _KAS_DISCARDED_ENTRY_KEYS,
@@ -548,35 +551,6 @@ def _audit_permission_decision(refs: str, outcome: str, reason: str, agent_id: s
         )
     except Exception:  # noqa: BLE001 — audit must not break projection
         logger.debug("SEL audit unavailable for KAS projection decision", exc_info=True)
-
-
-#: How many skill names one skill-scope record repeats before it summarises.
-_SKILL_SCOPE_AUDIT_NAMES = 40
-
-
-def _skill_scope_summary(rules: tuple[dict[str, Any], ...]) -> str:
-    """What the skill-scope denies keep and take away, in a bounded line."""
-    kept: list[str] = []
-    denied: list[str] = []
-    deny_all = False
-    for rule in rules:
-        if rule.get("exclude"):
-            kept.extend(rule["exclude"])
-        elif rule.get("match"):
-            denied.extend(rule["match"])
-        else:
-            deny_all = True
-
-    def _names(names: list[str]) -> str:
-        shown = ", ".join(names[:_SKILL_SCOPE_AUDIT_NAMES])
-        more = len(names) - _SKILL_SCOPE_AUDIT_NAMES
-        return f"{shown}, and {more} more" if more > 0 else shown
-
-    if kept:
-        return f"every skill denied except {len(kept)}: {_names(kept)}"
-    if denied:
-        return f"{len(denied)} default-tree skills denied by name: {_names(denied)}"
-    return "every skill denied" if deny_all else "no skill rule"
 
 
 def _audit_skill_scope(rules: tuple[dict[str, Any], ...], agent_id: str) -> None:
@@ -1190,6 +1164,11 @@ def to_client_custom_agent(
     )
     if shell_allowlist is not None:
         out[CREW_SHELL_ALLOWLIST_KEY] = shell_allowlist
+    # `deniedCommands` *permissions* does not carry: the gate refuses a shell call
+    # of this agent one matches (`spec-denied-commands` tier).
+    uncarried = uncarried_shell_denies(spec.get("toolsSettings"), permissions)
+    if uncarried is not None:
+        out[CREW_UNCARRIED_DENIES_KEY] = uncarried
     # `toolsSettings.fs_write.fallbackAction: "deny"`: the only paths the write
     # tool may touch, as the spec wrote them. Recorded whatever the ceiling says,
     # like the shell's; the gate refuses every other write of this agent
