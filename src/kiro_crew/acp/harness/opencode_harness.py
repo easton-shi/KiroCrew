@@ -98,11 +98,66 @@ class OpencodeHarness(MembershipHarness):
     # importing them -- do not copy.
 
     async def resolve_spawn(self, ctx: SpawnContext) -> SpawnPlan:
+        """Resolve the PROCESS-SCOPED half of the launch: the self-served binary and
+        argv, and the credential mask an enforced host is confined by.
+
+        This runs on the shared runtime, where ``ctx.session is None`` and the
+        process is shared by every session. Only the parts that depend on
+        ``ctx`` alone belong here:
+
+        * the binary/argv off the self-served ladder (``resolve_self_served_launch``),
+          which keys on the backend id, not a session;
+        * the credential-mask preflight (``_run_preflight_bounded(_sandbox_preflight)``),
+          which keys on backend + ``ctx.sandbox_mode``. opencode is ENFORCED, so this
+          mask is the compensating control for the passive reads ACP v1 cannot make
+          it ask about; an empty mask here is a missing control, not a simplification.
+
+        Deliberately NOT here (see the Seam 1 TODO above): the version gate and the
+        permission read-back. Both are coupled to a session's env/workdir
+        (``session._agent_env_for_spawn()``, ``session._extra_env``,
+        ``session._spawn_work_dir``) and the read-back mutates per-session state, so
+        they cannot run on a process-scoped spawn. Until they are moved onto a
+        per-session seam reading the live ``AcpSessionHandle``, this method REFUSES
+        rather than start a session whose asking posture was never established --
+        a half-wired opencode session would execute tool calls that never reach
+        Crew's gate.
+        """
+        # Deferred imports: kiro_crew.acp.launch and kiro_crew.acp_tool_gate reach
+        # back into the harness registry this module is part of, so both resolve at
+        # call time rather than at module scope (the same reason codex defers its
+        # client import).
+        from kiro_crew import acp_tool_gate
+        from kiro_crew.acp import launch as launch_mod
+
+        _bin, argv, spawn_label, stderr_label = await launch_mod.resolve_self_served_launch(
+            self.backend
+        )
+        # The credential mask, keyed on backend + tier. opencode is enforced, so a
+        # tier where the mask cannot be applied refuses inside this call.
+        hidden = await launch_mod._run_preflight_bounded(
+            launch_mod._sandbox_preflight, self.backend, ctx.sandbox_mode
+        )
+        expose = acp_tool_gate.adapter_expose_files(self.backend, hidden)
+
+        # TODO(opencode-shared-runtime): the version gate and the permission
+        # read-back run next on the per-session launch and both need a session.
+        # Move them to a per-session seam, then return the SpawnPlan below instead
+        # of raising. The mask is already resolved so it is carried on the plan when
+        # that lands:
+        #
+        #   return SpawnPlan(
+        #       argv=argv,
+        #       spawn_label=spawn_label,
+        #       stderr_label=stderr_label,
+        #       extra_hidden_dirs=hidden,
+        #       extra_expose_files=expose,
+        #   )
         raise NotImplementedError(
-            "OpencodeHarness.resolve_spawn is not implemented yet: the process-scoped "
-            "half (binary, version gate, credential mask) still needs porting from "
-            "OpencodeLaunch, and the per-session permission read-back must move onto a "
-            "per-session seam before an opencode session can start on the shared runtime."
+            "OpencodeHarness.resolve_spawn resolved the process-scoped half (binary, "
+            "argv, credential mask) but the per-session permission read-back is not "
+            "wired yet: an opencode session must not start on the shared runtime until "
+            "its asking posture is established on a per-session seam. "
+            f"(resolved argv={argv!r}, mask={len(hidden)} hidden dirs, {len(expose)} exposed)"
         )
 
     def apply_spawn_env(
