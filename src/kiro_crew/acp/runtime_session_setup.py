@@ -214,7 +214,7 @@ def _drop_withdrawn_stubs(
 class _MirroredSessionMcp(NamedTuple):
     """One mirrored host's ``session/new`` MCP array and what came with it.
 
-    Four things fall out of ONE agent-spec parse, and only the first is wire data.
+    Several things fall out of ONE agent-spec parse, and only the first is wire data.
     Returning them together is what stops a second parse from being needed for the
     others -- which would be the consistency window the projection exists to close,
     since the spec is a user-writable file that can change between two reads.
@@ -242,6 +242,17 @@ class _MirroredSessionMcp(NamedTuple):
     agent_spec: Any = None
     """The parsed spec the array was built from. A member session's loaded-check
     compares THIS, never a later read of the file, against its saved intent."""
+    harness_deny_rules: tuple[str, ...] = ()
+    """The per-tool deny rules the projection asks the harness to enforce, from the
+    SAME parse as ``servers``. Carried for the one host whose routing seeds them into
+    its own config and reads them back (opencode's ``VERIFIED_SEEDED_SETTINGS``); every
+    other mirror leaves it empty and nothing downstream reads it. It is the
+    shared-runtime counterpart of ``AcpClient._session_harness_deny_rules``."""
+    unhonoured_servers: frozenset[str] = frozenset()
+    """The servers whose per-tool narrowing the projection could NOT translate to a
+    wire rule, from the same parse. The opencode read-back matches a native mount by
+    this set so a narrowed-but-unhonoured server is refused rather than mounted with
+    its switched-off tool live. Empty for every mirror that translates its deny set."""
 
 
 async def _session_work_dir(self: AcpRuntime, cwd: str | Path | None = None) -> str | Path:
@@ -712,6 +723,8 @@ async def _mirrored_session_mcp(
         derived_spec_snapshot=projection.derived_spec_snapshot,
         ref_spec=ref_spec,
         agent_spec=projection.agent_spec,
+        harness_deny_rules=projection.harness_deny_rules,
+        unhonoured_servers=projection.unhonoured_servers,
     )
 
 
