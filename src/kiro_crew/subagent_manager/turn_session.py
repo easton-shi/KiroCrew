@@ -15,7 +15,7 @@ on the facade reaches them exactly as it reaches the turn body. ``turn_`` and no
 every ``run_*.py`` sibling is a module ``RunEventCoordinator`` binds members from, and these
 are plain functions the turn body calls.
 
-The manager fields this module reads (it writes none): ``_await_late_start``,
+The manager fields this module reads (it writes none): ``_agents``, ``_await_late_start``,
 ``_create_shared_session``, ``_ctx_builder``, ``_ensure_dedicated_start_priced``,
 ``_fire_event``, ``_gate_exit_reset``, ``_gate_wait_mark``, ``_global_approval_mode``,
 ``_is_cc_provider``, ``_is_yolo``, ``_note_startup_progress``, ``_parent_steering_dirs``,
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,45 @@ def _founding_session(conversation_key: str) -> str:
     return ""
 
 
+def _approval_lineage(
+    self: RunEventCoordinator, parent_key: str, revocation: int
+) -> tuple[tuple[str, int], ...] | None:
+    """The ``(session key, revocation stamp)`` pairs a stored ``"auto"`` on *parent_key*
+    rests on, root first: the parent's own, after the ones its run recorded when the
+    parent is itself a sub-agent (a root's revocation never touches the ``"auto"`` that
+    child's session was created with). ``None`` when the run on that sub-agent key holds
+    no ``"auto"`` itself, so the stored value is not its trust. Every run on the key is a
+    candidate (a continuation runs on the original's key): a live one first, then the
+    newest; with none left to read, the parent key alone."""
+    own = (parent_key, revocation)
+    if not parent_key.startswith("subagent:"):
+        return (own,)
+    runs = [
+        run
+        for run in list(self._manager._agents.values())
+        if (run.conversation_key or f"subagent:{run.id}") == parent_key
+    ]
+    if not runs:
+        return (own,)
+    inherited = max(runs, key=lambda run: (not run.done, run.started))._approval_lineage
+    return None if inherited is None else (*inherited, own)
+
+
+def parent_trust_revoked(
+    sessions: Any, lineage: tuple[tuple[str, int], ...] | None
+) -> Callable[[], bool] | None:
+    """For ``ParentPolicyAuto``: true while a key of *lineage* has a revocation outstanding
+    that it did not have when the run started. An ``"auto"`` write clears it; an eviction
+    is none."""
+    if not lineage:
+        return None
+
+    def _revoked() -> bool:
+        return any(sessions.approval_revocation(key) not in (0, seen) for key, seen in lineage)
+
+    return _revoked
+
+
 async def resolve_parent_policy(self: RunEventCoordinator, info: SubagentInfo) -> tuple[str, str]:
     """The approval policy the child's tool calls inherit, and the session its prompts are
     asked under: the parent session's policy, else ``auto`` from the spawn's own
@@ -63,17 +103,27 @@ async def resolve_parent_policy(self: RunEventCoordinator, info: SubagentInfo) -
     session keeps the parent's ``auto`` only when the session that started the
     conversation has it too. Otherwise its prompts are asked under that founder when the
     parent has ``auto``, and under no session when it does not, since a parent's Trust
-    can live on its tab without reaching this policy."""
+    can live on its tab without reaching this policy. Records on *info* the lineage the
+    grant's per-request re-check reads (``()`` for a fallback, ``None`` with no
+    ``"auto"``); a stored ``"auto"`` without one is not inherited."""
     _sa = _facade()
+    sessions = self._manager._sessions
     ask_key = info.parent_session_key
-    parent_policy = self._manager._sessions.get_approval_policy(ask_key)
+    # The stamp before the policy: the store writes them the other way round.
+    revocation = sessions.approval_revocation(ask_key)
+    parent_policy = sessions.get_approval_policy(ask_key)
     if info.conversation_key:
         founder = await asyncio.to_thread(_founding_session, info.conversation_key)
-        if founder != ask_key and self._manager._sessions.get_approval_policy(founder) != "auto":
+        if founder != ask_key and sessions.get_approval_policy(founder) != "auto":
             if parent_policy == "auto":
                 parent_policy, ask_key = "", founder
             else:
                 ask_key = ""
+    lineage: tuple[tuple[str, int], ...] | None = ()
+    if parent_policy == "auto" and info.parent_session_key:
+        lineage = _approval_lineage(self, info.parent_session_key, revocation)
+        if lineage is None:
+            parent_policy = ""
     # Explicit approval_mode from spawn caller (e.g. Mochi bg agent)
     if not parent_policy and info.approval_mode == "auto":
         parent_policy = "auto"
@@ -133,6 +183,7 @@ async def resolve_parent_policy(self: RunEventCoordinator, info: SubagentInfo) -
                 source="subagent",
                 resources=f"subagent_id={info.id}",
             )
+    info._approval_lineage = (lineage or ()) if parent_policy == "auto" else None
     return parent_policy, ask_key
 
 
