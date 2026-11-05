@@ -574,7 +574,18 @@ async def apply_session_permission_routing(self: AcpSessionHandle) -> None:
     that decision, so the scope is not re-derived here.
     """
     backend = self._runtime.acp_backend
-    if acp_tool_gate.routing_for(backend) is not acp_tool_gate.Routing.SESSION_CONFIG:
+    routing = acp_tool_gate.routing_for(backend)
+    if routing is acp_tool_gate.Routing.VERIFIED_SEEDED_SETTINGS:
+        # The seed itself is established at spawn (process-level
+        # OPENCODE_CONFIG_CONTENT / GOOSE_MODE); what remains per-session is the
+        # verification against THIS session, which the harness owns. Dispatched by
+        # routing, not by backend id (H13): goose's seam is the base no-op because it
+        # read its mode back off session/new, and opencode's runs its debug-config
+        # read-back against this handle. A refusal raises, which terminates the
+        # session rather than running it with an unverified posture.
+        await self._runtime._harness.verify_session_routing(self)
+        return
+    if routing is not acp_tool_gate.Routing.SESSION_CONFIG:
         return
     if self.mirror_used and self._runtime._member_projection_needs_confirmation(self.mirror_used):
         await self._runtime._confirm_member_projection(self)

@@ -645,6 +645,36 @@ class HarnessAdapter(LaunchAdapter):
         """
         return None
 
+    async def verify_session_routing(self, handle: Any) -> None:
+        """Establish and verify this session's asking posture, after session/new.
+
+        A per-session hook the runtime calls from ``apply_session_permission_routing``
+        for a ``Routing.VERIFIED_SEEDED_SETTINGS`` host, once the session exists and
+        before its first prompt. The default is no-op, which is the right answer for
+        every host whose asking posture is established some other way:
+
+        * ``AGENT_SPEC`` (kiro-cli, KAS) and ``SESSION_CONFIG`` (codex) never reach
+          this call -- the routing gate in ``apply_session_permission_routing`` runs
+          their own branch and returns before it;
+        * goose IS ``VERIFIED_SEEDED_SETTINGS`` but reads its resolved mode back off
+          the ``session/new`` response, so it has nothing to do here and keeps this
+          no-op;
+        * opencode is the one host that overrides it: its ``opencode debug config``
+          read-back is a per-session verification that cannot run at the shared
+          process spawn (``OPENCODE_CONFIG_CONTENT`` is process-level, and the project
+          config opencode resolves depends on THIS session's work dir), so it runs
+          here against the live handle.
+
+        Dispatched by ROUTING, not by backend id (harness-parity H13): the shared
+        ``apply_session_permission_routing`` path adds a ``Routing`` branch, never an
+        ``if backend == opencode``, and this seam is what that branch calls so the
+        Kiro path gains no conditional. Raise ``AcpToolGateUnroutable`` (or any
+        exception the runtime maps) to refuse the session rather than run it with an
+        unestablished posture. ``handle`` is the ``AcpSessionHandle``; typed loosely
+        to keep this module free of the session-handle import.
+        """
+        return None
+
     @abc.abstractmethod
     def session_mcp_servers(
         self,
