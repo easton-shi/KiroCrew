@@ -643,6 +643,7 @@ class TestPrReadiness:
             "fast-gate.yml|Fast Gate",
             "build.yml|Build",
             "code-review.yml|Code Review",
+            "pr-hygiene.yml|PR Hygiene",
             # Every PR must declare a triaged issue; a lane readiness does not
             # aggregate is a gate that can go red without turning the PR red.
             "issue-gate.yml|Issue Gate",
@@ -655,6 +656,24 @@ class TestPrReadiness:
         assert 'skipped) passed+=("$label")' in workflow
         assert '(.app.slug // "") == "github-advanced-security"' in workflow
         assert 'neutral|"") pending+=("$label (results pending)")' in workflow
+
+    def test_code_review_ignores_description_edits_and_pr_hygiene_hears_them(self) -> None:
+        # Code Review hears no edit and reads no description; PR Hygiene reads it
+        # and must hear the edit. A retarget onto main is safe without a re-scan
+        # only while CI, Fast Gate and Build do not start on `edited` either.
+        def types(name: str) -> set[str]:
+            doc = yaml.safe_load(_workflow(name))
+            trigger = (doc.get("on") or doc[True])["pull_request"] or {}
+            return set(trigger.get("types") or ("opened", "synchronize", "reopened"))
+
+        code_review = _workflow("code-review.yml")
+        assert "edited" not in types("code-review.yml")
+        assert "pull_request.title" not in code_review
+        assert "pull_request.body" not in code_review
+        # fix_loop_metrics reads code-review.yml runs as proof PR Hygiene ran.
+        assert types("code-review.yml") | {"edited"} <= types("pr-hygiene.yml")
+        for name in ("ci.yml", "fast-gate.yml", "build.yml"):
+            assert "edited" not in types(name), name
 
     def test_readiness_listens_for_the_fast_gate_run_and_carves_it_out_when_stacked(
         self,
