@@ -102,6 +102,29 @@ def _learn(args: argparse.Namespace) -> None:
     if action == "remove" and not str(args.query).strip():
         print("rule substring required", file=sys.stderr)
         sys.exit(2)
+    # Validate add's fields through the same LEARN_ADD_SCHEMA that POST
+    # /api/lessons and the learn_add MCP tool run, so the three surfaces share
+    # one rule/negative cap (MAX_SHORT_STRING) and one refusal message. Checked
+    # before the vector store is opened so a rejected write creates nothing;
+    # scoped to add because only add carries a rule. The refusal goes to stderr
+    # with a non-zero exit, like the blank-argument refusal above, so a script
+    # driving this command sees the failure.
+    if action == "add":
+        from kiro_crew.validation import (
+            LEARN_ADD_SCHEMA,
+            ValidationError,
+            validate_tool_args,
+        )
+
+        _to_check = {"rule": args.rule, "category": args.category}
+        _negative = getattr(args, "negative", None)
+        if _negative is not None:
+            _to_check["negative"] = _negative
+        try:
+            validate_tool_args(_to_check, LEARN_ADD_SCHEMA)
+        except ValidationError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
     # Global persistence switch (memory.persistence_enabled): the CLI writes to
     # the store directly (no HTTP), so it carries its own check mirroring the
     # POST /api/lessons refusal. Refused ahead of the vector store because
