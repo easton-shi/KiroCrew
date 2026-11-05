@@ -48,7 +48,14 @@ _NOT_FOUND = {"error": "not found", "code": "slot_not_found"}
 #: own timeout is ``_APPROVAL_TIMEOUT`` (hours), so a regression that leaves it
 #: pending must fail here by name, well inside pytest-timeout.
 _SETTLE = 5.0
-_NO_GRANT = {"error": "app cannot manage session approvals", "code": "session_approval_not_granted"}
+#: What a 403 for an app that does not declare the grant carries, beside the prose.
+_NO_GRANT = {"code": "session_approval_not_granted", "cause": "not_declared"}
+
+
+async def _refused_without_grant(resp) -> bool:
+    body = await resp.json()
+    return resp.status == 403 and body.items() >= _NO_GRANT.items()
+
 
 _API = [
     "/api/approvals",
@@ -245,7 +252,7 @@ async def test_app_without_grant_cannot_resolve_user_session_approval(state):
     future = _native_approval(state, "user-tab", "7", origin=SlotOrigin.USER)
     async with _serve(state) as client:
         resp = await client.post("/api/approvals/7/approve", params=_q(_PLAIN))
-        assert (resp.status, await resp.json()) == (403, _NO_GRANT)
+        assert await _refused_without_grant(resp)
         assert not future.done()
 
 
@@ -269,8 +276,8 @@ async def test_app_without_grant_is_refused_its_own_slot_exactly_like_the_slot_r
             params=_q(_PLAIN),
             json={"action": "approved", "request_id": "8"},
         )
-        assert (by_id.status, await by_id.json()) == (403, _NO_GRANT)
-        assert (by_slot.status, await by_slot.json()) == (403, _NO_GRANT)
+        assert await _refused_without_grant(by_id)
+        assert await _refused_without_grant(by_slot)
         assert not future.done()
 
 
