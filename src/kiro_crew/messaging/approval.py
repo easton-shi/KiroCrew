@@ -318,6 +318,12 @@ def deliver_verdict(session_key: str, verdict: str, conversation_id: str = "") -
     entry = pending_for(session_key, conversation_id)
     if entry is None:
         return RECEIPT_EXPIRED
+    if verdict == TRUST:
+        from kiro_crew.messaging.session_trust import trust_permitted
+
+        if not trust_permitted():
+            # A ``permission_mode`` deny of ``trust``: approve this one tool, and say so.
+            verdict = APPROVE
     if not entry.future.done():
         entry.future.set_result(verdict)
     _forget(entry.session_key, entry.request_id)
@@ -451,6 +457,12 @@ class TextReplyApprovalDecider:
         approval policy, never an in-memory trust set.
         """
         if self._sessions is None:
+            return
+        from kiro_crew.messaging.session_trust import trust_permitted
+
+        if not trust_permitted():
+            # The press approved this one tool; the policy denies the standing grant.
+            logger.info("approval: session Trust refused by policy")
             return
         try:
             self._sessions.set_approval_policy(self.session_key, "auto")

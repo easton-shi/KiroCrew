@@ -324,6 +324,7 @@ def build_job(
     valid_approval_modes = ("", "auto")
     if approval_mode not in valid_approval_modes:
         raise ValueError(f"Invalid approval_mode: {approval_mode!r}")
+    refuse_policy_denied_auto(approval_mode)
     # Writer mirror of _job_from_record's representable-number type-shape
     # check: the reader may skip a record with a non-representable
     # schedule numeric (NaN/Infinity/bignum) precisely BECAUSE no write
@@ -449,6 +450,10 @@ def apply_job_update(
         valid_approval_modes = ("", "auto")
         if kwargs["approval_mode"] not in valid_approval_modes:
             raise ValueError(f"Invalid approval_mode: {kwargs['approval_mode']!r}")
+        if job.approval_mode != "auto":
+            # Refuse only a NEW ``auto``: an edit that resends the stored value must
+            # still save; the fire path already runs it as asking.
+            refuse_policy_denied_auto(kwargs["approval_mode"])
     # Validate before any mutations
     # Table-driven type+length gate for every updatable string
     # field. Falsy values are intentional no-ops (the assignment
@@ -714,3 +719,44 @@ def apply_job_update(
         job.schedule = CronSchedule(kind="cron", cron_expr=kwargs["cron_expr"])
     elif "every_secs" in kwargs and kwargs["every_secs"]:
         job.schedule = CronSchedule(kind="every", every_secs=int(kwargs["every_secs"]))
+
+
+def refuse_policy_denied_auto(approval_mode: str) -> None:
+    """Refuse a job's ``auto`` when the ``permission_mode`` policy denies ``trust``.
+
+    ``auto`` approves every tool of the job's own session without asking, which is a
+    session Trust. The fire path re-checks (:func:`effective_job_approval_mode`), so a
+    job saved before the policy landed asks instead of auto-approving.
+    """
+    if approval_mode == "auto" and not cron_job_auto_permitted():
+        raise ValueError("approval_mode 'auto' is disabled by your organization's policy")
+
+
+def cron_job_auto_permitted() -> bool:
+    """Whether a job's ``approval_mode="auto"`` may auto-approve now. From memory."""
+    from kiro_crew.approval_mode_policy import session_mode_permitted
+
+    return session_mode_permitted("trust")
+
+
+def effective_job_approval_mode(approval_mode: str) -> str:
+    """The mode a job fires with: its own, minus an ``auto`` the policy now denies."""
+    if approval_mode == "auto" and not cron_job_auto_permitted():
+        return ""
+    return approval_mode
+
+
+def auto_job_approver(fallback: Any) -> Any:
+    """The approver an ``auto`` job's turn runs with: approve while ``auto`` holds.
+
+    The turn's ``AUTO_APPROVE`` policy is fixed when it starts, so a deny that lands
+    mid-turn is honoured here, per request: the call goes to *fallback* (the cron's
+    interactive approval) instead.
+    """
+
+    async def _approve(event: Any) -> bool:
+        if cron_job_auto_permitted():
+            return True
+        return bool(await fallback(event))
+
+    return _approve

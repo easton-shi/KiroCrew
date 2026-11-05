@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any
 
 from kiro_crew import name_grant, permission_floor
+from kiro_crew.approval_mode_policy import session_mode_permitted
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config import KiroCrewConfig, live
 from kiro_crew.config.fields import _safe_int
@@ -1568,7 +1569,7 @@ async def _stream_task(
                     await client.reject_tool(event.request_id)
                     continue
                 # YOLO mode (global) or channel trust — auto-approve
-                if (is_yolo and is_yolo()) or channel.trusted:
+                if (is_yolo and is_yolo()) or (channel.trusted and session_mode_permitted("trust")):
                     approval_outcome = (
                         "auto_approved_yolo"
                         if (is_yolo and is_yolo())
@@ -1846,6 +1847,9 @@ async def _stream_task(
 
                 if decision not in ("approved", "rejected", "trust"):
                     decision = "rejected"
+                if decision == "trust" and not session_mode_permitted("trust"):
+                    # The policy denies ``trust``: the press approves this tool only.
+                    decision = "approved"
 
                 if decision in ("approved", "trust") and _is_shell and _cmd:
                     # A human read this exact command and said yes: record the

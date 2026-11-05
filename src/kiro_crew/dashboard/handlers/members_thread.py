@@ -612,7 +612,10 @@ def _seed_member_approval(state: DashboardState, slot: Any, mode: str) -> None:
     if slot._member_approval_seeded:
         return
     slot._member_approval_seeded = True
-    effective = mode or MEMBER_APPROVAL_MODE_UNSET_EFFECTIVE
+    from kiro_crew.approval_mode_policy import clamp_session_mode
+
+    # The Profile cannot raise a thread above what the policy allows.
+    effective = clamp_session_mode(mode or MEMBER_APPROVAL_MODE_UNSET_EFFECTIVE)
     if effective == "normal" or slot._trust or slot._trust_reads or slot._trust_scope:
         return
     key = effective_session_key(slot)

@@ -45,6 +45,7 @@ from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.messaging.identity import channel_inbound_permitted
 from kiro_crew.messaging.queue_drain import entries_queued_by
 from kiro_crew.messaging.renderer import count_redaction_tags, redaction_notice
+from kiro_crew.messaging.session_trust import trust_permitted
 from kiro_crew.security import (
     redact_and_truncate,
     redact_credentials,
@@ -546,8 +547,10 @@ async def dispatch(payload: dict) -> None:
                 error="unauthorized user",
             )
             return
-        is_trust = action_id.startswith(TOOL_TRUST_ACTION_PREFIX)
-        approved = is_trust or action_id.startswith(TOOL_APPROVE_ACTION_PREFIX)
+        pressed_trust = action_id.startswith(TOOL_TRUST_ACTION_PREFIX)
+        approved = pressed_trust or action_id.startswith(TOOL_APPROVE_ACTION_PREFIX)
+        # Under a policy that denies ``trust`` a Trust press approves this tool only.
+        is_trust = pressed_trust and trust_permitted()
         # value / action_id suffix carry the session-namespaced approval token
         # (session_key:request_id) so a click resolves ONLY its own session's
         # pending tool — kiro-cli request ids restart at 1 per session — plus the

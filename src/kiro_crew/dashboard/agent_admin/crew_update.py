@@ -584,6 +584,22 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
                     },
                     status=409,
                 )
+            from kiro_crew.approval_mode_policy import session_mode_permitted
+
+            # A NEW mode the ``permission_mode`` policy denies is refused; resending
+            # the stored one saves, and its live grant is clamped where it is seeded.
+            if body["approval_mode"] != agent.approval_mode and not session_mode_permitted(
+                body["approval_mode"]
+            ):
+                return web.json_response(
+                    {
+                        "error": f"approval mode {body['approval_mode']!r} is disabled by "
+                        "your organization's policy",
+                        "code": "mode_disabled_by_policy",
+                        "mode": body["approval_mode"],
+                    },
+                    status=403,
+                )
             # Validated above. Only ever a real choice: the profile never sends
             # "" back, so a pinned mode cannot fall back to the trust default.
             agent.approval_mode = body["approval_mode"]

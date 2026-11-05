@@ -18,12 +18,12 @@ if TYPE_CHECKING:
 
     from kiro_crew.dashboard.chat_handlers import (
         _SLOT_SCOPED_TRUST_MODES,
+        KNOWN_APPROVAL_MODES,
         DashboardState,
         GrantDeadline,
         _ChatSlot,
         _deny_app_yolo,
         _mark_permission_resolved,
-        approval_mode_permitted,
         base_consent_pattern,
         base_trust_patterns,
         cron_creator_admission,
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         safety_override,
         sel,
         session_grant,
+        session_mode_permitted,
         slot_not_found,
         trust_reaches_subagents,
         yolo_policy_permits,
@@ -297,30 +298,21 @@ async def api_chat_mode(request: web.Request) -> web.Response:
     # YOLO is process-global and stays dashboard-only.
     if request_app and mode == "yolo":
         return _deny_app_yolo(request_app, "chat_mode:yolo")
-    # Governance gate: the ``approval_modes`` policy scope governs ``yolo`` and
-    # only ``yolo``. Refuse a denied mode here, before any mutation, so it is
-    # blocked regardless of the UI. ``normal`` is the interactive floor, and
-    # ``trust`` / ``trust_reads`` are non-deniable because their live consumption
-    # predicates are not gated -- ``approval_mode_permitted`` short-circuits all
-    # three, and a policy naming one is refused at parse time. Kept as a general
-    # mode check rather than a YOLO special case so that widening the scope needs
-    # no change here; YOLO is additionally guarded at arming in ``safety_override``.
-    #
-    # ``yolo`` reads the PUSHED verdict, which is resolved when a ceiling is installed
-    # and so needs no thread: there is one answer for the ceiling in force, and a
-    # governance-evaluation error resolved to a deny at that install. Every other mode
-    # is non-deniable and short-circuits inside ``approval_mode_permitted`` -- but an
-    # unrecognised ``mode`` string does reach governance, so that branch keeps its
-    # offload.
-    if mode == "yolo":
-        if not yolo_policy_permits():
-            return _deny_approval_mode(
-                caller=audit_caller("dashboard:chat_mode"),
-                operation=f"chat_mode:{mode}",
-                mode=mode,
-                resource=str(body.get("slot") or ""),
-            )
-    elif not await asyncio.to_thread(approval_mode_permitted, mode):
+    # Governance gate: the ``approval_modes`` policy scope (KGL ``permission_mode``)
+    # governs ``yolo``, ``trust`` and ``trust_reads``; ``normal`` is the floor. Refuse
+    # a denied mode here, before any mutation, so it is blocked regardless of the UI.
+    # A mode id Crew does not know is refused as bad input, never passed on. Both
+    # verdicts are PUSHED at ceiling install, so neither needs a thread.
+    if mode not in KNOWN_APPROVAL_MODES:
+        return web.json_response(
+            {
+                "ok": False,
+                "error": f"unknown approval mode: {str(mode)[:40]!r}",
+                "code": "unknown_approval_mode",
+            },
+            status=400,
+        )
+    if not (yolo_policy_permits() if mode == "yolo" else session_mode_permitted(mode)):
         return _deny_approval_mode(
             caller=audit_caller("dashboard:chat_mode"),
             operation=f"chat_mode:{mode}",
@@ -418,6 +410,15 @@ async def apply_approval_mode(
     which applies the stored permission to the crewmate's live DM slot through
     this same path rather than a copy of it.
     """
+    # Every caller reaches the mutation through here, so the session-mode policy is
+    # checked here too, not only in ``api_chat_mode``.
+    if mode in ("trust", "trust_reads") and not session_mode_permitted(mode):
+        return _deny_approval_mode(
+            caller=audit_caller("dashboard:chat_mode"),
+            operation=f"mode_change:{mode}",
+            mode=mode,
+            resource=slot_key or "",
+        )
     # The safety override (YOLO) is PROCESS-GLOBAL while an approval mode is
     # per-slot, so revoking it on behalf of a request that named ONE slot drops
     # every OTHER slot out of YOLO too. That is how a programmatic per-slot
@@ -615,6 +616,24 @@ async def apply_approval_mode(
         except Exception:
             logger.warning("SEL audit failed for normal mode activation", exc_info=True)
 
+    # A ``permission_mode`` deny can land during the awaits above, after its own
+    # teardown ran: drop what this request just wrote, and sweep nothing on it.
+    if mode in ("trust", "trust_reads") and not session_mode_permitted(mode):
+        yolo_live = safety_override().is_active()
+        for s in list(state._slots.values()):
+            if mode == "trust" and s._trust_held:
+                s._trust = False
+                s._trust_card_scoped = False
+                if not yolo_live:
+                    state.sessions.set_approval_policy(effective_session_key(s), "")
+            elif mode == "trust_reads":
+                s._trust_reads = False
+        return _deny_approval_mode(
+            caller=audit_caller("dashboard:chat_mode"),
+            operation=f"mode_change:{mode}",
+            mode=mode,
+            resource=slot_key or "",
+        )
     # The sessions this slot created follow its new mode, capped at it.
     inherited_slots: set[str] = set()
     # Only from the slot the branch above wrote: one closed or replaced during its
@@ -1171,6 +1190,15 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
     )
     if _override_refusal is not None:
         return _override_refusal
+    # A card's Trust / Trust-reads press sets a session mode, so the policy that
+    # governs ``api_chat_mode`` governs it too. Checked before any side effect.
+    if action in ("trust", "trust_reads") and not session_mode_permitted(action):
+        return _deny_approval_mode(
+            caller=audit_caller(),
+            operation=f"tool_approval:{action}",
+            mode=action,
+            resource=request_id,
+        )
     # Trust: auto-approve remaining tools for this slot. The approval policy MUST
     # be keyed by the OWNER's EFFECTIVE session key — a linked cron/workflow or
     # channel-surfaced slot runs under ``linked_session_key``, not
@@ -1296,7 +1324,8 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
         # longer-lived decision that no yolo deny expires.
         if not yolo_policy_permits():
             for s in state._slots.values():
-                if not (trust_reaches_subagents(s) or s._trust_reads):
+                # Held grants: the trust mask is on while a ceiling installs.
+                if not (s._trust_held or s._trust_reads_held):
                     state.sessions.set_approval_policy(effective_session_key(s), "")
             state.push_slots_update()
         action = "approved"

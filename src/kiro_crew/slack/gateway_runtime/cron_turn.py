@@ -48,11 +48,13 @@ if TYPE_CHECKING:
         acp_error_after_tool_activity,
         acp_error_is_session_not_found,
         acp_error_is_transient,
+        auto_job_approver,
         configured_fallback_chain,
         consume_reinjection,
         context_meter_reading,
         dataclass,
         declared_mcp_not_ready_note,
+        effective_job_approval_mode,
         engine_attributed_model,
         logger,
         note_turn_landed,
@@ -281,12 +283,15 @@ async def _cron_run_sequence(
                     unattended=True,
                     approval_policy=(
                         ToolApprovalPolicy.AUTO_APPROVE
-                        if job.approval_mode == "auto"
+                        if effective_job_approval_mode(job.approval_mode) == "auto"
                         else ToolApprovalPolicy.HOOK_BASED
                     ),
                     hooks=self.ctx_builder.hooks,
                     on_tool_approval=(
-                        None if job.approval_mode == "auto" else self._interactive_approval("cron")
+                        # ``auto`` is re-checked per request: a mid-turn deny asks instead.
+                        auto_job_approver(self._interactive_approval("cron"))
+                        if effective_job_approval_mode(job.approval_mode) == "auto"
+                        else self._interactive_approval("cron")
                     ),
                     on_tool_gate=_gate.note,
                     on_complete=_seq_note_complete,
@@ -686,12 +691,15 @@ async def _cron_run_single(
             unattended=True,
             approval_policy=(
                 ToolApprovalPolicy.AUTO_APPROVE
-                if job.approval_mode == "auto"
+                if effective_job_approval_mode(job.approval_mode) == "auto"
                 else ToolApprovalPolicy.HOOK_BASED
             ),
             hooks=self.ctx_builder.hooks,
             on_tool_approval=(
-                None if job.approval_mode == "auto" else self._interactive_approval("cron")
+                # ``auto`` is re-checked per request: a mid-turn deny asks instead.
+                auto_job_approver(self._interactive_approval("cron"))
+                if effective_job_approval_mode(job.approval_mode) == "auto"
+                else self._interactive_approval("cron")
             ),
             on_tool_gate=_gate.note,
             on_complete=_note_complete,
