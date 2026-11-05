@@ -11,6 +11,10 @@ considerations"):
   and the app must currently be enabled; deny-by-default otherwise.
 - Pushes are rate limited per app (token bucket); violations are SEL-logged
   and rejected with 429.
+
+``/api/notifications/own`` (GET, and POST ``ack`` / ``unack`` / ``ack-all``) lets an
+app read and acknowledge the notes it pushed and nothing else: the source is matched
+against the host-stamped ``app:<name>``, never a body field an app could choose.
 """
 
 from __future__ import annotations
@@ -23,8 +27,12 @@ from aiohttp import web
 
 from kiro_crew.apps.manager import app_lifecycle_lock, get_app_manifest, is_app_enabled
 from kiro_crew.apps.manifest import RESERVED_APP_NAMES
-from kiro_crew.dashboard.handlers._shared import read_bounded_json
+from kiro_crew.dashboard.handlers._shared import (
+    read_bounded_json,
+    require_owner_dashboard_request,
+)
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
+from kiro_crew.dashboard.notification_coordinator import unread_count
 from kiro_crew.notifications import vapid_keys
 from kiro_crew.notifications.bus import (
     NotificationPayload,
@@ -251,6 +259,84 @@ async def api_push_notification(request: web.Request) -> web.Response:
         resources=full_channel,
     )
     return web.json_response({"ok": True, "note": note})
+
+
+# ── An app's own notes (the list behind its sidebar badge) ──────────────────
+
+
+async def _own_source(request: web.Request, named: object) -> str | web.Response:
+    """The ``app:<name>`` source this caller may read and acknowledge, or a refusal.
+
+    An app caller is always its own app: the identity token auth verified, whatever
+    the request names. The owner's dashboard, where the app's page runs, names the app.
+    """
+    app_name = str(request.get("app") or "")
+    if not app_name:
+        denied = await require_owner_dashboard_request(request, "notifications_own")
+        if denied is not None:
+            return denied
+        app_name = named if isinstance(named, str) else ""
+        if not app_name:
+            return web.json_response(
+                {"error": "app is required", "code": "own_notifications_app_required"},
+                status=400,
+            )
+    return f"app:{app_name}"
+
+
+async def api_own_notifications(request: web.Request) -> web.Response:
+    """GET /api/notifications/own — the notes the host stamped with the caller's app."""
+    source = await _own_source(request, request.query.get("app"))
+    if isinstance(source, web.Response):
+        return source
+    notes = [n for n in request.app["state"]._notification_log if n.get("source") == source]
+    return web.json_response({"notifications": notes, "unread": unread_count(notes)})
+
+
+async def _mark_own(request: web.Request, *, acknowledged: bool, every: bool) -> web.Response:
+    """Set ``acked`` on one of the caller app's own notes, or on all of them."""
+    body, cap_err = await read_bounded_json(request, allow_absent=every)
+    if cap_err is not None:
+        return cap_err
+    body = body or {}
+    source = await _own_source(request, body.get("app"))
+    if isinstance(source, web.Response):
+        return source
+    state = request.app["state"]
+    notes = [n for n in state._notification_log if n.get("source") == source]
+    if not every:
+        ts = body.get("ts")
+        notes = [n for n in notes if ts and n.get("ts") == ts]
+        if not notes:
+            # Another source's note reads the same as no note: nothing to confirm.
+            return web.json_response(
+                {"error": "no such notification", "code": "own_notification_not_found"},
+                status=404,
+            )
+    changed = [n for n in notes if bool(n.get("acked")) != acknowledged]
+    for note in changed:
+        note["acked"] = acknowledged
+    if changed:
+        await state._rewrite_notifications_async()
+    event = "notification_ack" if acknowledged else "notification_unack"
+    for note in changed:
+        state.broadcast_ws(event, {"ts": note.get("ts")})
+    return web.json_response({"ok": True})
+
+
+async def api_own_notification_ack(request: web.Request) -> web.Response:
+    """POST /api/notifications/own/ack — mark one of the caller app's notes read."""
+    return await _mark_own(request, acknowledged=True, every=False)
+
+
+async def api_own_notification_unack(request: web.Request) -> web.Response:
+    """POST /api/notifications/own/unack — mark one of the caller app's notes unread."""
+    return await _mark_own(request, acknowledged=False, every=False)
+
+
+async def api_own_notifications_ack_all(request: web.Request) -> web.Response:
+    """POST /api/notifications/own/ack-all — mark every note of the caller app read."""
+    return await _mark_own(request, acknowledged=True, every=True)
 
 
 # ── Web Push subscription management (dashboard-user routes) ────────────────
