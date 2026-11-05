@@ -1138,11 +1138,11 @@
     },
     {
       "id": "developer.agent-harness-per-bot",
-      "label": "Agent harness per Bot",
+      "label": "Agent harness per bot",
       "tab": "developer",
       "route": "/settings/developer/feature-previews?highlight=developer.agent-harness-per-bot",
-      "description": "Lets one Bot run on another AI coding tool.",
-      "hint": "Adds an Agent harness setting to each Bot's profile, so one Bot can run on a different AI coding tool, such as Claude Code, with that tool's models, while the rest keep the default."
+      "description": "Lets one bot run on another AI coding tool.",
+      "hint": "Adds an Agent harness setting to each bot's profile, so one bot can run on a different AI coding tool, such as Claude Code, with that tool's models, while the rest keep the default."
     },
     {
       "id": "developer.also-send-screenshots-of-the-agent-s-browser-tab",
@@ -1191,11 +1191,11 @@
     },
     {
       "id": "developer.bot-sessions-on-the-bot-s-profile",
-      "label": "Bot sessions on the Bot's profile",
+      "label": "Bot sessions on the bot's profile",
       "tab": "developer",
       "route": "/settings/developer/feature-previews?highlight=developer.bot-sessions-on-the-bot-s-profile",
-      "description": "Moves a Bot's chats to its Sessions tab.",
-      "hint": "Moves the chats a Bot opens out of your Sessions list, Recents and grid, onto that Bot's Sessions tab. The Bot's own chat stays where it is, and History and search still find every chat."
+      "description": "Moves a bot's chats to its Sessions tab.",
+      "hint": "Moves the chats a bot opens out of your Sessions list, Recents and grid, onto that bot's Sessions tab. The bot's own chat stays where it is, and History and search still find every chat."
     },
     {
       "id": "developer.chat-on-a-crew",
@@ -1269,10 +1269,10 @@
     },
     {
       "id": "developer.reply-threads-on-bot-chat-messages",
-      "label": "Reply threads on Bot chat messages",
+      "label": "Reply threads on bot chat messages",
       "tab": "developer",
       "route": "/settings/developer/feature-previews?highlight=developer.reply-threads-on-bot-chat-messages",
-      "hint": "Let any message in a Bot's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted."
+      "hint": "Let any message in a bot's chat carry its own reply thread, opened in the side panel while the chat stays visible. Off, the Reply in thread control is not offered and existing threads are hidden, not deleted."
     },
     {
       "id": "developer.run-a-local-gateway",
