@@ -490,6 +490,15 @@ async def _spawn_admitted(self: AcpRuntime) -> None:
     try:
         plan = await self._resolve_spawn_plan()
         self._max_rss_depth = plan.rss_depth
+        # Save the credential mask this spawn asked for, so a trusted per-session
+        # corroboration run (opencode's debug-config read-back on the shared
+        # runtime) can rebuild the SAME mounts the child runs under rather than a
+        # weaker profile. The attribute and its docstring were already reserved for
+        # this on the runtime (``sandbox_hidden_dirs``); only the write was missing.
+        # Empty for a host whose tools ask by construction; non-empty for an
+        # enforced host, exactly as ``plan.extra_hidden_dirs`` reaches the sandbox
+        # wrap below.
+        self._sandbox_hidden_dirs = tuple(plan.extra_hidden_dirs)
         argv = plan.argv
         if self._launch_agent and "--agent" in argv:
             # The harness built ``--agent <identity>`` and ran its spawn gates
