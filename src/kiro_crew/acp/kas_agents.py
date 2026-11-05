@@ -94,7 +94,7 @@ from kiro_crew.acp.kas_permissions import (
     unprompted_capabilities,
     withhold_answered_under_authored_rules,
     withhold_hook_gated_auto_approval,
-    without_allowed_commands,
+    without_grant_only_settings,
 )
 from kiro_crew.acp.kas_prompt_paths import is_unsafe_prompt_path as _is_unsafe_prompt_path
 from kiro_crew.acp.kas_tool_limits import (
@@ -275,7 +275,7 @@ def _allowed_commands_withheld(spec: dict[str, Any], policy: dict[str, Any] | No
         {"execute_bash"},
         policy,
         authored_permissions=spec.get("permissions"),
-        tools_settings=without_allowed_commands(spec.get("toolsSettings")),
+        tools_settings=without_grant_only_settings(spec.get("toolsSettings")),
     )
 
 
@@ -1169,7 +1169,7 @@ def to_client_custom_agent(
         crew_answered,
         authored_policy,
         authored_permissions=spec.get("permissions"),
-        tools_settings=spec.get("toolsSettings"),
+        tools_settings=without_grant_only_settings(spec.get("toolsSettings")),
     )
     if crew_answered:
         out[CREW_ANSWERED_BUILTINS_KEY] = sorted(crew_answered)

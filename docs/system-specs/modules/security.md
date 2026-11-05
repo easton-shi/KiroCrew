@@ -2545,7 +2545,12 @@ or an authored restriction in the RAW spec inputs
 `authored_restricted_capabilities`): any non-`allow` rule in the spec's own
 `permissions` block, all three capabilities when that block is anything but a
 readable `{"rules": [...]}` with no `policies` bundle (the shapes the merge refuses
-whole), and any `toolsSettings` entry for one of these built-ins. The raw reading
+whole), and any `toolsSettings` entry for one of these built-ins. The keys that
+only grant on kiro-cli are not read as a restriction there: a shell entry's
+`allowedCommands` and a read or write entry's `allowedPaths`
+(`kas_permissions.without_grant_only_settings`), so `allowedTools: ["write"]` with
+`write.allowedPaths` still writes without a prompt, as on kiro-cli. Any other key
+beside them (`deniedPaths`, `fallbackAction`, `denyByDefault`) still withholds. The raw reading
 exists because a merge or a translation drops what it cannot carry; an authored
 "ask me" reaches Crew as a permission request, and the `allowedTools` grant must not
 answer it. Because it is a grant row, every deny row
