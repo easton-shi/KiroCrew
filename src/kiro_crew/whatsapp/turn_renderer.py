@@ -61,6 +61,10 @@ from kiro_crew.messaging.renderer import (
     repaired_after_a_sent_tail,
 )
 from kiro_crew.messaging.transport import TransportCapabilities
+from kiro_crew.option_action_marker import (
+    strip_option_action_markers,
+    unfinished_option_action_prefix_start,
+)
 from kiro_crew.whatsapp import client as wa_client
 from kiro_crew.whatsapp.files import (
     REASON_UPLOAD_FAILED,
@@ -101,7 +105,8 @@ _ERROR_TEXT = "Something went wrong on my side. Please try again."
 
 def _strip_options(text: str) -> str:
     """Drop the dashboard-only [OPTIONS: ...] trailer (no buttons here)."""
-    return OPTIONS_RE_TRAILER.sub("", relocate_glued_tail_marker(text)).strip()
+    text = relocate_glued_tail_marker(strip_option_action_markers(text))
+    return OPTIONS_RE_TRAILER.sub("", text).strip()
 
 
 class WhatsAppRenderer(Renderer):
@@ -252,7 +257,7 @@ class WhatsAppRenderer(Renderer):
         """
         if self._finalized:
             return
-        chunks = await self._rendered_chunks()
+        chunks = await self._rendered_chunks(live=True)
         if not chunks or self._sealed_count >= len(chunks):
             return
         # Every chunk before the last is final: the splitter is prefix-stable, so
@@ -311,7 +316,7 @@ class WhatsAppRenderer(Renderer):
         )
         await self._show(repaired if repaired is not None else tail)
 
-    async def _rendered_chunks(self) -> list[str]:
+    async def _rendered_chunks(self, *, live: bool = False) -> list[str]:
         """The turn's text as the chunks that would actually be delivered.
 
         The WHOLE body is converted and split, never just the unsealed remainder:
@@ -337,6 +342,10 @@ class WhatsAppRenderer(Renderer):
         same point, for the first half of that reason.
         """
         visible, _protocol_suffix = split_trailing_protocol_suffix(self.text())
+        if live:
+            prefix_start = unfinished_option_action_prefix_start(visible)
+            if prefix_start != -1:
+                visible = visible[:prefix_start]
         body = await asyncio.to_thread(hide_local_refs, visible)
         if not body:
             return []

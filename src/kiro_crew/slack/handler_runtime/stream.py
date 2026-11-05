@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         redact_exfiltration_urls,
         split_message,
         strip_control_comments,
+        strip_option_action_markers_after,
         strip_thinking_tags,
     )
 
@@ -80,13 +81,29 @@ def _comment_hold_is_protocol(hold: str) -> bool:
     return len(hold) <= _COMMENT_HOLD_MAX and is_control_tag_tail(hold)
 
 
-def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -> tuple[str, str]:
-    """Filter ``[OPTIONS: ...]`` tags and control-tag comments from streaming
-    text character-by-character.
+def _filter_options_brackets(
+    text: str,
+    bracket_hold: str,
+    stream_buffer: str,
+    accumulated: str | None = None,
+    *,
+    actions: bool = True,
+) -> tuple[str, str]:
+    """Filter option tags and control comments from streaming text.
+
+    Every ``[`` follows the original OPTIONS stream rule: hold through its
+    first ``]``, then drop an ``[OPTIONS:`` span or release any other span.
+    With *actions* enabled, an ``[OPTION-ACTIONS:`` candidate instead waits
+    through the whole line so the shared action grammar can judge fence,
+    widget, balance, sibling, and trailing-prose context. Its residual is fed
+    back through the original OPTIONS rule with action detection disabled.
+
+    *accumulated* is the whole reply so far, ending with *text*. It supplies
+    context that arrived before the current chunk.
 
     Returns the updated *(bracket_hold, stream_buffer)* tuple. The hold is one
-    string and its first character says what it holds: ``[`` opens the OPTIONS
-    bracket-hold, a line-leading ``<`` opens the comment hold.
+    string and its first character says what it holds: ``[`` opens an option
+    bracket hold, and a line-leading ``<`` opens the comment hold.
 
     Slack streams by APPENDING and appended text is final (``chat.stopStream``
     does not replace it), so a control tag can only be kept off the stream by
@@ -105,7 +122,9 @@ def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -
     as the diverging byte arrives -- and that byte is then processed on its
     own, so a ``[`` that ends a hold still opens the bracket-hold.
     """
-    for ch in text:
+    reply = accumulated if accumulated is not None else text
+    offset = len(reply) - len(text)
+    for i, ch in enumerate(text):
         if bracket_hold and bracket_hold[0] == "<":
             if _comment_hold_is_protocol(bracket_hold + ch):
                 bracket_hold += ch
@@ -116,12 +135,17 @@ def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -
             bracket_hold = ""
         if bracket_hold:
             bracket_hold += ch
-            if ch == "]":
-                if bracket_hold.startswith("[OPTIONS:"):
-                    bracket_hold = ""
-                else:
+            if actions and bracket_hold[:16].upper() == "[OPTION-ACTIONS:":
+                if ch == "\n":
+                    context = reply[: offset + i + 1]
+                    if not context.endswith(bracket_hold):
+                        context = bracket_hold
+                    bracket_hold, out = _settle_action_hold(context, bracket_hold)
+                    stream_buffer += out
+            elif ch == "]":
+                if not bracket_hold.startswith("[OPTIONS:"):
                     stream_buffer += bracket_hold
-                    bracket_hold = ""
+                bracket_hold = ""
         elif ch == "[":
             bracket_hold = ch
         elif ch == "<" and _at_tag_line_start(stream_buffer):
@@ -131,18 +155,29 @@ def _filter_options_brackets(text: str, bracket_hold: str, stream_buffer: str) -
     return bracket_hold, stream_buffer
 
 
+def _settle_action_hold(context: str, bracket_hold: str) -> tuple[str, str]:
+    """Settle one action candidate, then apply the original OPTIONS stream rule."""
+    start = len(context) - len(bracket_hold)
+    residual = strip_option_action_markers_after(context, start)
+    return _filter_options_brackets(residual, "", "", actions=False)
+
+
 def _resolve_comment_hold(bracket_hold: str, accumulated: str) -> tuple[str, str]:
-    """Settle a comment hold when the stream ENDS; returns *(hold, release)*.
+    """Settle a comment or action hold when the stream ends.
 
     The stream is over, so the held span is the reply's tail, and the tail
-    grammar can now be asked directly on the whole reply -- fence parity and
-    all: when ``strip_control_comments`` removes something from *accumulated*,
-    the held tail IS the control tag and is dropped; when it removes nothing
-    (an unterminated fence swallows the tail, a tag prefix that never
-    completed, a body over the bound) the span is content and is released for
-    one last append. A ``[`` hold is not this function's: it keeps the
-    bracket-hold's own end-of-turn outcome.
+    grammar can now be asked directly on the whole reply. An action candidate
+    uses the same settlement as a newline and drops any residual ``[`` hold,
+    matching the original OPTIONS end-of-turn outcome.
+
+    For a comment, when ``strip_control_comments`` removes something from
+    *accumulated*, the held tail is the control tag and is dropped. When it
+    removes nothing, the span is content and is released for one last append.
+    Any other ``[`` hold keeps the bracket hold's own end-of-turn outcome.
     """
+    if bracket_hold[:16].upper() == "[OPTION-ACTIONS:" and accumulated.endswith(bracket_hold):
+        _, out = _settle_action_hold(accumulated, bracket_hold)
+        return "", out
     if not bracket_hold or bracket_hold[0] != "<":
         return bracket_hold, ""
     if strip_control_comments(accumulated) != accumulated:
@@ -746,7 +781,7 @@ class _AnswerStream:
         # On ']', release if not OPTIONS, suppress if it is.
         if self.use_slack_stream:
             self.bracket_hold, self.stream_buffer = _filter_options_brackets(
-                event.text, self.bracket_hold, self.stream_buffer
+                event.text, self.bracket_hold, self.stream_buffer, self.accumulated
             )
         else:
             self.stream_buffer += event.text

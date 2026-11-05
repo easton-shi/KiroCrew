@@ -156,6 +156,7 @@ from kiro_crew.messaging.session_trust import (  # noqa: F401 - read by the owne
     is_session_trusted,
 )
 from kiro_crew.messaging.turn_ceiling import TurnCeilingExceeded
+from kiro_crew.option_action_marker import strip_option_action_markers_after
 from kiro_crew.parent_turns import note_turn_landed, settle_turn
 from kiro_crew.permission_floor import OUTCOME_REJECTED_TRANSPORT_FLOOR
 from kiro_crew.platform import current_context
@@ -374,6 +375,7 @@ from kiro_crew.slack.handler_runtime.stream import (  # noqa: F401
     _resolve_comment_hold,
     _safe_final_update,
     _safe_update,
+    _settle_action_hold,
     _ts_before,
 )
 from kiro_crew.slack.handler_runtime.turn import (  # noqa: F401

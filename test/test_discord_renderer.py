@@ -242,6 +242,23 @@ class TestRenderer:
         assert "94314d2db" not in visible
 
     @pytest.mark.asyncio
+    async def test_long_options_before_a_tag_and_action_become_buttons(self) -> None:
+        r, cli = self._renderer()
+        labels = [f"choice {i} " + "x" * 90 for i in range(25)]
+        await r.on_turn_start()
+        await r.on_text_chunk(
+            "Body.\n[OPTIONS: " + " | ".join(labels) + "]\n<!-- keep-visible -->\n"
+        )
+        await r.on_text_chunk("[OPTION-ACTIONS: close=Done]")
+        await r.on_done()
+
+        components = [c for _, c in cli.sent if c] + [c for _, _, c in cli.edits if c]
+        shown = [b["label"] for comp in components for row in comp for b in row["components"]]
+        assert len(shown) == 25
+        messages = [text for text, _ in cli.sent] + [text for _, text, _ in cli.edits]
+        assert "| choice 17" not in messages[-1]
+
+    @pytest.mark.asyncio
     async def test_long_output_rotates_messages(self) -> None:
         r, cli = self._renderer()
         await r.on_turn_start()

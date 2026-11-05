@@ -35,6 +35,7 @@ from kiro_crew.webex.transport import WEBEX_CAPABILITIES
 
 TAG = "<!-- keep-visible -->"
 DELIVER = "<!-- deliver:slack -->"
+ACTION = "[OPTION-ACTIONS: close=Done]"
 QUOTED = "the `<!-- ordinary -->` comment and the `<!-- keep-visible -->` tag stay"
 
 
@@ -117,6 +118,36 @@ class TestSplitTrailingProtocolSuffixControlTags:
     def test_tag_after_options_rides_with_the_options(self) -> None:
         text = f"body\n[OPTIONS: a | b]\n{TAG}"
         assert split_trailing_protocol_suffix(text) == ("body\n", f"[OPTIONS: a | b]\n{TAG}")
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            f"{TAG}\n{ACTION}",
+            f"{TAG}\n{ACTION}\n{TAG}",
+            f"{ACTION}\n{TAG}\n{ACTION}",
+            f"{TAG}\n{ACTION}\n{TAG}\n{ACTION}",
+            f"{TAG}\n[OPTION-ACTIONS: clo",
+        ],
+        ids=[
+            "tag-action",
+            "tag-action-tag",
+            "action-tag-action",
+            "tag-action-tag-action",
+            "tag-partial-action",
+        ],
+    )
+    def test_an_action_marker_after_the_tag_keeps_the_options_in_the_suffix(
+        self, tail: str
+    ) -> None:
+        visible, suffix = split_trailing_protocol_suffix(f"body\n[OPTIONS: a | b]\n{tail}")
+        assert visible == "body\n"
+        assert suffix.startswith("[OPTIONS: a | b]")
+
+    def test_an_action_marker_above_a_tag_and_options_rides_in_the_suffix(self) -> None:
+        visible, _suffix = split_trailing_protocol_suffix(
+            f"body\n{ACTION}\n{TAG}\n[OPTIONS: a | b]"
+        )
+        assert "[OPTION-ACTIONS" not in visible
 
     def test_quoted_tag_is_not_protocol(self) -> None:
         assert split_trailing_protocol_suffix(QUOTED) == (QUOTED, "")

@@ -665,3 +665,36 @@ class TestRedactionNotice:
         await r.on_text_chunk(f"Run: psql {self._SECRET_URI}")
         await r.on_done()  # must not raise
         assert any("[REDACTED: credential]" in c for _jid, c in transport.sent)
+
+
+@pytest.mark.asyncio
+class TestLiveActionHeadHold:
+    @pytest.mark.parametrize("prefix", ["[", "[option-act", "[OPTION-ACTIONS"])
+    async def test_a_partial_action_head_cannot_seal_away_following_text(self, prefix: str) -> None:
+        caps = TransportCapabilities(max_message_chars=60, max_buttons=0)
+        transport, client = FakeTransport(), FakeClient()
+        renderer = WhatsAppRenderer(transport, client, "c@s.whatsapp.net", caps)
+        head = "[OPTION-ACTIONS:"
+        await renderer.on_turn_start()
+        await renderer.on_text_chunk("x" * 115 + "\n" + prefix)
+        await settle(renderer)
+        renderer._last_edit_at = 0.0
+        await renderer.on_text_chunk(head[len(prefix) :] + " close=Done]\nEND")
+        await settle(renderer)
+        await renderer.on_done()
+
+        delivered = [content for _jid, content in transport.sent]
+        delivered.extend(text for _message_id, text in client.edits)
+        assert "END" in "".join(delivered)
+        assert not any(prefix.casefold() in text.casefold() for text in delivered)
+        assert not any("[OPTION-ACT" in text.upper() for text in delivered)
+
+    async def test_a_reply_ending_in_a_literal_short_prefix_is_delivered_on_done(self) -> None:
+        renderer, transport, client = make()
+        await renderer.on_turn_start()
+        await renderer.on_text_chunk("literal [o")
+        await renderer.on_done()
+
+        delivered = [content for _jid, content in transport.sent]
+        delivered.extend(text for _message_id, text in client.edits)
+        assert "literal [o" in "".join(delivered)
