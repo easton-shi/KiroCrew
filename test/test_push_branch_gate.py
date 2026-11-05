@@ -336,6 +336,29 @@ class TestGitPushEnforcement:
             "Blocked by security policy"
         )
 
+    def test_an_unquoted_expansion_before_the_subcommand_is_unverifiable(
+        self, captured_sel_events
+    ) -> None:
+        # `$d` word-splits at run time, so this pushes main. The quoted form stays
+        # one word, and an ordinary non-push command keeps working.
+        P = "pus" + "h"
+        for cmd in (
+            f"d='x {P} origin main'; git -C $d {P} origin feature",
+            f"git --git-dir=$d {P} origin feature",
+        ):
+            assert "rule=git-publish-target-unverifiable" in (is_denied(cmd) or ""), cmd
+        assert is_denied(f'git -C "$d" {P} origin feature') is None
+        assert is_denied("git -C $d status") is None
+
+    def test_a_dollar_quote_before_the_subcommand_is_one_word(self, captured_sel_events) -> None:
+        # `$'...'` and `$"..."` are quoting, not expansions: they cannot word-split.
+        P = "pus" + "h"
+        assert is_denied(f"git -C $'/tmp/repo' {P} origin feature") is None
+        assert is_denied(f'git -C $"/tmp/repo" {P} origin feature') is None
+        assert "rule=git-publish-target-unverifiable" in (
+            is_denied(f"git -C $'/tmp/'$d {P} origin feature") or ""
+        )
+
     def test_chained_dangerous_command_denied_without_allow_audit(
         self, captured_sel_events
     ) -> None:
