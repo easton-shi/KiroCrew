@@ -103,6 +103,41 @@ def _hook_mcp_resources(
     return resources
 
 
+def _bare_mcp_resources(
+    matcher: str,
+    servers: Iterable[str] | None,
+    tool_names: McpToolNames | None,
+) -> set[str] | None:
+    """The MCP resources a bare tool-name *matcher* (no MCP form, no glob, no ``/``)
+    needs an ``ask`` on, or ``None``.
+
+    The gate also names a KAS MCP call by its bare tool name
+    (``hook_dispatch.pre_tool_match_names``), so ``get_creds`` meets that tool on
+    every server. ``None`` -- the caller covers everything, as for any name it does
+    not know -- unless the auto-approved *servers* are known and at least one of
+    their cached tools meets the matcher, which proves it names an MCP tool. Then,
+    per server: the cached tools it meets; the matcher as written when the cached
+    list has none (a tool that server exposes later under that name); the whole
+    server when nothing is cached for it.
+    """
+    # Deferred: the hook store's module is heavy.
+    from kiro_crew.hooks import _tool_matches
+
+    if servers is None or tool_names is None or "/" in matcher:
+        return None
+    resources: set[str] = set()
+    met = False
+    for server in servers:
+        tools = tool_names(server)
+        if not tools:
+            resources.add(f"{server}/*")
+            continue
+        hits = {f"{server}/{tool}" for tool in tools if _tool_matches(matcher, tool)}
+        met = met or bool(hits)
+        resources |= hits or {f"{server}/{matcher}"}
+    return resources if met else None
+
+
 def auto_approved_mcp_servers(policy: Any) -> frozenset[str] | None:
     """The literal servers *policy*'s ``mcp`` allows are confined to.
 
