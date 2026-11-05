@@ -166,6 +166,10 @@ CREW_SHELL_ALLOWLIST_KEY = "_crewShellAllowlist"
 #: entry of the list covers.
 CREW_WRITE_ALLOWLIST_KEY = "_crewWriteAllowlist"
 
+#: The key the active entry carries what :mod:`kiro_crew.acp.kas_settings_mcp`
+#: read from the mcp.json / cli.json files under, until the wire envelope applies it.
+CREW_SETTINGS_MCP_KEY = "_crewSettingsMcp"
+
 #: Keys of a projected ``customAgents`` entry that never reach the engine.
 CREW_ONLY_ENTRY_KEYS: frozenset[str] = frozenset(
     {
@@ -173,6 +177,7 @@ CREW_ONLY_ENTRY_KEYS: frozenset[str] = frozenset(
         CREW_ANSWERED_COMMANDS_KEY,
         CREW_SHELL_ALLOWLIST_KEY,
         CREW_WRITE_ALLOWLIST_KEY,
+        CREW_SETTINGS_MCP_KEY,
     }
 )
 

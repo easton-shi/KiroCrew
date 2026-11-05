@@ -57,6 +57,7 @@ from kiro_crew.acp.harness.base import (
 from kiro_crew.acp.kas_agents import KasAgentTranslationError
 from kiro_crew.acp.kas_app_identity import resolve_app_identity_launches
 from kiro_crew.acp.kas_host_auth import answer_get_access_token, vault_holds_identity_off_loop
+from kiro_crew.acp.kas_settings_mcp import stamp_settings_mcp, with_legacy_mcp_json
 from kiro_crew.acp.kas_transport import (
     METHOD_KAS_AUTH_GET_ACCESS_TOKEN,
     build_kas_argv,
@@ -775,6 +776,7 @@ class KasHarness(MembershipHarness):
         crew_panel: bool = False,
         session_key: str = "",
         worker_stub_names: frozenset[str] | None = None,
+        session_cwd: str | Path | None = None,
     ) -> SessionExtras:
         """Project the agent spec onto KAS, for both session start paths.
 
@@ -933,7 +935,8 @@ class KasHarness(MembershipHarness):
             custom_agents = kas_agents_mod.build_kas_custom_agents(
                 prompt_dir,
                 agent,
-                spec,
+                # kiro-cli's .amazonq fallback, which KAS never reads.
+                with_legacy_mcp_json(spec, session_cwd or work_dir),
                 stub_server_names=stubbed,
                 member_dispatch=member_dispatch,
                 crew_panel=crew_panel,
@@ -941,6 +944,9 @@ class KasHarness(MembershipHarness):
                 skill_scope_rules=_skill_scope_rules(agent, spec, prompt_dir, work_dir),
                 withheld_out=withheld,
             )
+            # The mcp.json / cli.json reads the wire envelope finishes the block
+            # from, read here off the loop and beside the session's own directory.
+            custom_agents = stamp_settings_mcp(custom_agents, agent, session_cwd or work_dir)
             # Resolved HERE, in this thread, for the runtime's hoist: the managed
             # launch it stamps the session token onto comes from the ``kirocrew``
             # launcher lookup, which probes the filesystem and PATH.
