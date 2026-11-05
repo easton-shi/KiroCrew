@@ -96,6 +96,7 @@
         "dependency_wake_spacing_secs": 1.0,
         "interactive_command_policy": "cancel",
         "workflow_run_timeout_secs": 3600,
+        "kas_workflows": false,
         "subagent_mem_buffer_pct": 20,
         "chat_turn_timeout_secs": 14400,
         "session_start_timeout_secs": 90,
@@ -988,7 +989,7 @@
       "sensitive": false,
       "tags": [],
       "label": "Session Sharing",
-      "help": "Subagents reuse a shared ACP runtime instead of spawning a fresh backend process per subagent. Reduces startup from ~3-5s to ~200ms and memory from ~400MB to near-zero per subagent. Default ON for the eligible backends (kiro-cli and codex); every other ACP backend ignores it and runs a dedicated process per subagent. Set false to opt an eligible backend back onto per-subagent processes.",
+      "help": "Subagents reuse a shared ACP runtime instead of spawning a fresh backend process per subagent. Reduces startup from ~3-5s to ~200ms and memory from about 0.55 GB to near-zero per subagent. Default ON for the eligible backends (kiro-cli and codex); every other ACP backend ignores it and runs a dedicated process per subagent. Set false to opt an eligible backend back onto per-subagent processes.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": true
@@ -1529,6 +1530,20 @@
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": 3600
+    },
+    {
+      "path": "agent.kas_workflows",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Kiro Workflows on Kiro Agent",
+      "help": "Developer opt-in to Kiro Agent's (KAS) own workflow engine, off by default. This build has no surface that reads it yet, so setting it changes nothing. No effect unless the backend is Kiro Agent.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
     },
     {
       "path": "agent.subagent_mem_buffer_pct",
@@ -4205,6 +4220,7 @@
         "threads": 0,
         "endpointing": false,
         "submit_on_release": false,
+        "slide_to_send": false,
         "dictation_panel": true,
         "timeout_secs": 300,
         "transcribe_region": "us-east-1",
@@ -4416,6 +4432,20 @@
       "tags": [],
       "label": "Send when I stop recording",
       "help": "Send the message once the transcript is ready when you deliberately stop dictating: letting go of hold-to-talk, releasing the push-to-talk key, or pressing the mic or the key again. Shift-click the mic, or slide sideways on the phone's hold bar, to keep a draft instead; with a push-to-talk binding that does not use Shift, Shift as you release works too. Cancelling, losing focus and the recording time limit never send. Works with streaming and batch transcription; off by default.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "stt.slide_to_send",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Slide up and right to send",
+      "help": "On the phone's hold-to-talk bar, slide up and to the right before you let go to send what you said, or to steer the agent while it works. Sliding straight up or to the left still cancels. Only while 'Send when I stop recording' is off; with it on, letting go already sends. Off by default.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false
@@ -9339,6 +9369,20 @@
       "tags": [],
       "label": "Feature preview: layout_harness",
       "help": "Turn on the 'layout_harness' feature preview.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": false
+    },
+    {
+      "path": "dashboard.feature_previews.mate_sessions",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Feature preview: mate_sessions",
+      "help": "Turn on the 'mate_sessions' feature preview.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": false

@@ -1692,6 +1692,33 @@ advance the generation through the public `start_app_backend` or
 `stop_app_backend` entry points, which take `_health_reconcile_lock` and `_lock`
 and call `_advance_lifecycle_locked`, never by mutating `_processes` directly.
 
+### 7.3 An install registers and starts nothing for a disabled record
+
+`register_app` never consults `enabled`, so whether an install publishes an app's
+agents, skills, MCP servers and crons and starts its backend is decided by the
+caller, from the live record. `apps/routes_lifecycle._app_may_run_after_install`
+is that read, for a fresh install and an update alike: True only when the record
+is enabled and not waiting for session-approval consent. `install_app` writes a
+new record disabled, so a fresh managed install from the registry route, its SSE
+stream or the local-path route registers nothing and starts no backend; its
+`registration` is empty and `GET /api/apps` shows it disabled with no files in the
+agents directory. The resources arrive at the guarded `enable_app` transition
+(`routes_enable.handle_enable_app`, `kirocrew app enable`), which the detail
+page's Enable button calls after the install. A record that is enabled after the
+install (an update of an enabled app, a self-managed record
+`register_external_app` writes enabled) registers and starts as before. The
+file-only `kirocrew app install` follows the same rule and prints the enable
+hint. Registry default installs (§15.1) read
+`_app_may_enable_after_install` instead, which answers only "may this be enabled
+without the user" (a record exists and no consent is pending), and then take the
+same `enable_app` transition before registering.
+
+Writers: `apps/routes_lifecycle.py` (`_app_may_run_after_install`,
+`_app_may_enable_after_install`), `apps/routes_registry.py`,
+`apps/routes_install.py::handle_install_app`, `apps/default_installs.py`,
+`cli_commands_app.py`. Pinned by
+`test/test_apps_install_registers_nothing_disabled.py`.
+
 ## 8. An app's EventBus only exists with a real broadcast function
 
 `build_app_context` returns `events=None` when `broadcast_fn` is None, and
@@ -2935,6 +2962,13 @@ independently load-bearing:
   same way, but `inventory_for_install` raises it as `CatalogNoInstallSource`
   (a `CatalogUnavailable` subclass) so the refusal text says the catalog lists
   the app with no install source instead of claiming it could not be reached.
+  The update of an app that records its `sourceUrl` refuses the same way:
+  `_registry_app_candidates` lets `CatalogUnavailable` propagate (every other
+  lookup error still yields no candidate), and `_resolve_install_entry` turns
+  it into fixed outage or no-install-source text instead of "no registry entry
+  matches its recorded source". Both of its branches run the lookup inside
+  `official_catalog.install_attempt()`, so an update click makes a real fetch
+  rather than refusing from a listing page's failure memory.
 - **Supersession is URL-scoped.** A catalog row replaces a same-repo seed row
   (scheme/host case-folded, path case preserved); a different-repo name
   collision keeps the seed, so a republished document cannot silently re-home
@@ -3777,6 +3811,25 @@ It differs in serving the wider `_ALLOWED_EXTENSIONS` set (`.js`/`.json`/`.mjs`/
 and in being UNAUTHENTICATED, which is why it streams in `_UI_STREAM_CHUNK` pieces
 instead of buffering.
 
+**Text files go gzip-encoded.** A `_GZIP_EXTENSIONS` file (`.mjs`/`.js`/`.css`/`.json`/
+`.svg`/`.map`) of at least `_GZIP_MIN_BYTES` is sent `Content-Encoding: gzip` when
+`Accept-Encoding` admits gzip with a non-zero weight (`_accepts_gzip`): an explicit
+`gzip` entry decides, `q=0` included, and `*` counts only when gzip is not named, so
+`gzip;q=0, *` gets identity. Each
+streamed chunk passes through one per-request `zlib` compressor off the event loop, so
+memory stays one chunk plus the compressor's state, and the body goes chunked (its
+length is not known up front); the `remaining` cap still bounds the bytes read. A file
+that hits EOF short of its validated size (truncated under the descriptor) aborts the
+connection instead of finishing the gzip member, since no `Content-Length` would expose
+the short body. The
+encoded bytes are their own representation: their ETag carries a `-gz` suffix, so an
+identity validator never answers 304 for them, and every compressible type answers
+`Vary: Origin, Accept-Encoding`. Images and fonts are already compressed and go as
+they are. Why it matters: a self-bundled link-preview entry can be megabytes, and on a
+slow remote link the raw bytes outlast the frame's `READY_TIMEOUT_MS`; the frame is
+then torn down mid-download, the partial module is never cached, and every later
+hover starts the same download again and fails the same way (§18a).
+
 `/api/apps/blob` (`handle_blob_proxy`) serves registry art, `.svg` included, through
 `web.FileResponse` from a cache the gateway itself wrote, not an app-owned install
 tree. It answers with the same `default-src 'none'; sandbox` policy, because those
@@ -4271,6 +4324,75 @@ allow-scripts`, so it is an opaque origin even when opened top-level. No second
 listener is added: an opaque origin is cross-origin to the dashboard wherever it
 is served from, as the MCP-app frames already are.
 
+**The dashboard loads the frame and makes its requests.** A sandboxed frame sends no
+cookie on its own requests (opaque origin, `credentialless`), so an authenticating
+reverse proxy in front of the dashboard (one that signs every request in by cookie)
+answers them with its login page: the frame document never loads where the iframe
+navigation is cookieless, and elsewhere the module import and every `ctx.fetch` get
+an HTML 403. So:
+
+- **Document.** A first mint (no `?frame`) also returns `document`: the frame
+  document built with `srcdoc=True` (`_frame_html`), after the mint's own checks
+  (dashboard session, resolver, admission). The frame still loads by URL first
+  (`appFrame/sandboxFrame.loadMintedFrame`), so nothing changes where that works;
+  the gateway's document says `boot` as it parses. When the URL load finishes
+  without a `boot` within `BOOT_GRACE_MS` (1.5 s; a proxy's login page, as a
+  cookieless Chromium navigation gets), the dashboard sets the minted document as
+  the iframe's `srcdoc` (which takes precedence over `src`); the iframe keeps
+  `sandbox="allow-scripts"` and `credentialless`. srcdoc is therefore only the
+  fallback for a load that was already failing: a sandboxed srcdoc frame is recorded
+  to blank-render on WebKit (`dashboard/handlers/sandbox_doc.py`), which this path
+  has not been checked against, and no frame that loads today is moved onto it. A
+  srcdoc document has no response headers, so its policy is a `<meta>` first in
+  `<head>`: `frame_meta_csp`, the directives of `frame_csp` with `'self'` spelled
+  as `SRCDOC_SELF`, which the dashboard replaces with `location.origin` (today's
+  frame URL origin; `'self'` in an opaque srcdoc document matches nothing).
+  `sandbox` and `frame-ancestors` cannot be in a `<meta>`: the attribute is the
+  sandbox, and the dashboard builds the document itself. A srcdoc document also
+  inherits the dashboard page's own policy, so both apply and the result is no
+  wider than either; that page policy allows inline scripts (`'unsafe-inline'`),
+  which the nonce'd bootstrap and module need, and a change that drops it breaks
+  srcdoc frames. Without `document` (a renewal) nothing falls back.
+- **Relay.** Every frame is told a relay nonce in `init`. A srcdoc frame, or a URL
+  frame whose module import was refused, sends `relay` messages (path, method, headers, body)
+  carrying a per-frame nonce the dashboard minted and sent in `init`;
+  `appFrame/frameRelay.ts` answers only that frame's window with that nonce, and
+  sends exactly that request with the page's own cookies (`credentials:
+  same-origin`, `mode: same-origin`, `redirect: error`) and nothing added. A frame
+  reaches only its own app's `/app-frame-fetch/<app>/…` (the fetch route's methods)
+  and `/apps/<app>/ui/…` (GET), with only the request headers its preflight allowed
+  (`content-type`, the capability) or that are CORS-safelisted; a dot segment,
+  another app, a core route or any other header is refused unsent, and so is any
+  percent-encoded `/`, `\` or `.` in the path (a front proxy that decodes them
+  would resolve `..%2f` past this check), or a path that, decoded once, holds a dot
+  segment. The fetch route drops every `Set-Cookie` and `Clear-Site-Data` the app's backend returns
+  (`add_app_frame_cors`): the relayed request carries the page's credentials, so
+  such a header would otherwise land on the dashboard's origin. The answer
+  carries what a CORS read would have exposed: the CORS-safelisted response
+  headers, and on the fetch route only a response the gateway marked readable
+  (`Access-Control-Allow-Origin: null`, set once the capability verified); anything
+  else is a network error, as it is today. The answer streams: `relay.response`
+  (status, headers) resolves the frame's fetch at once, `relay.chunk`s feed its body
+  and `relay.end` / `relay.error` close it, so a long-lived response (an event
+  stream) reaches the frame as it arrives; cancelling the body or the fetch's
+  signal sends `relay.abort`, which aborts the dashboard's request. A request body
+  is serialized in the frame by the platform (`new Request(..., { body })`), so
+  `FormData` keeps its multipart boundary; an abort while it is read sends nothing.
+  Bodies up to 8 MiB (a string counted in UTF-8 bytes), 32 in flight per frame. A
+  relay checks every `RELAY_SWEEP_MS` (1 s) that its frame is still in the document,
+  and aborts that frame's requests once it is not, so a removed frame cannot keep a
+  stream open. Point hosts skip relay messages (`isRelayMessage`) before their own rate
+  and size bounds. The gateway's checks run on the relayed request unchanged.
+- **Module.** The bootstrap imports `entry` by URL first, so where that request is
+  served (localhost, a plain forward) nothing changes. When it is refused (Firefox
+  sends the cookie on the iframe navigation, so the URL document loads but its
+  cookieless module import does not), the frame fetches the source through the relay and runs it as a nonce'd inline module;
+  that module hands over its entry with `globalThis.kirocrew.register(activate)`
+  (a function only, the same `activate` it exports), read only while it evaluates, so a module imported by URL
+  that also registers activates once. A module that only exports `activate` keeps
+  the URL path and still fails behind an authenticating proxy. The ready deadline
+  covers both paths.
+
 The boundary:
 
 - **Where it listens.** Only links and spans inside a chat message's root
@@ -4352,7 +4474,8 @@ The boundary:
   a revision (entry, version, install and update time); when an app-list refresh shows a new
   revision for a key, its frames are disposed, so the next hover loads the current
   entry (app UI files are `no-cache` with an ETag, so the new frame gets the new
-  bytes).
+  bytes; text files are gzip-encoded, §16, so a cold frame on a slow link still
+  loads its module before `READY_TIMEOUT_MS`).
 - **Embedded instances.** The frame request carries no cookie (credentialless,
   auth bypass), so it cannot read the embedding parent's port the way a dashboard
   page does. The mint, on the person's session, reads the validated
@@ -5208,8 +5331,14 @@ the issue time. The wire format and the verifier's steps are in
 The proxy strips any caller-sent `X-KiroCrew-Proxy` and `X-KiroCrew-Principal`
 for every app, opted in or not, so a backend sees only the gateway's values. It
 also drops every relay identity header (`x-kiro-relay-*`, matched by prefix in any
-case), so no backend receives one. An
-app that does not opt in receives no principal header. A
+case), so no backend receives one. It forwards no credential of the caller's
+either: the `cookie` and `authorization` headers are dropped, and so is every
+`token` query field (`_PROXY_STRIP_QUERY_PARAMS`, matched after the same
+percent-decoding aiohttp applies), because `token_auth` reads the dashboard and
+app token from `?token=`. `_forwarded_query` removes those fields before the
+request-target is built, keeping every other field's wire bytes and order, so the
+v1, v2 and principal signatures cover exactly the target the backend receives.
+An app that does not opt in receives no principal header. A
 signer refusal returns 502 `proxy_principal_sign_failed` rather than forwarding
 an opted-in request without its claim.
 
@@ -5253,7 +5382,8 @@ and the same `ts`. The `v2:` prefix keeps the two MAC inputs disjoint.
 Writers: `apps/routes_proxy.py`, `apps/proxy_auth.py`, `apps/manifest_sections.py`. Tests:
 `test/test_app_proxy_auth.py`, `test/test_app_proxy_auth_v2.py`,
 `test/test_app_proxy_auth_v2_node_reference.py`, `test/test_app_manifest.py`,
-`test/test_gateway_appkit_endpoints_signed_proxy.py`.
+`test/test_gateway_appkit_endpoints_signed_proxy.py`,
+`test/test_app_proxy_query_credential.py`.
 
 ## 24a. An app writes a Bot's Dashboard value through the shared record door
 
@@ -5483,11 +5613,11 @@ records which module owns which part, so a change lands in its owner.
 |---|---|
 | `routes.py` | The facade: the only import path and patch surface, installing `kiro_crew._facade_mirror` over the owners below, and the route table (`register_app_routes`) |
 | `routes_lifecycle.py` | The steps the install, update, uninstall, enable and disable handlers share: `_check_min_version`, the dual-pass warning redactor `_redact_warning`, `_register_app_off_loop` / `_deregister_app_off_loop`, `_start_backend_after_install`, `_stop_backend_and_observe`, `_app_may_run_after_install`, `_restore_app_after_failed_update`, `_suspend_app_for_session_approval_reconsent`, `_refuse_while_startup_hook_runs` and `_unregister_notification_channels` |
-| `routes_proxy.py` | The reverse proxy from an app's dashboard UI to its own backend (`handle_app_api_proxy`): `_resolve_app_backend_url`, the per-app secret cache it signs with (`_get_app_secret`, `invalidate_app_secret_cache`), the principal claim (`_proxy_principal`), the headers it strips and the event-stream relay |
+| `routes_proxy.py` | The reverse proxy from an app's dashboard UI to its own backend (`handle_app_api_proxy`): `_resolve_app_backend_url`, the per-app secret cache it signs with (`_get_app_secret`, `invalidate_app_secret_cache`), the principal claim (`_proxy_principal`), the headers and the `token` query credential it strips (`_forwarded_query`) and the event-stream relay |
 | `routes_static.py` | An installed app's UI bundle (`handle_app_ui_file`, `_open_ui_file` and the stream bounds), the content types the UI and art routes answer with, and `handle_app_dev_mode` |
 | `routes_art.py` | The installed-art route (`handle_app_art_file`) over an app's manifest-declared art (`_declared_art_paths`, `_read_declared_art`), and the git blob proxy (`handle_blob_proxy`, `_fetch_git_blob`) with the repository and ref validators (`_is_safe_repo_identifier`, `_SAFE_REF_RE`), the fetch timeout and concurrency bound, and the blob-cache touch. Both art paths screen on one extension set |
 | `routes_listing.py` | `handle_list_apps`, `handle_get_app` and `handle_get_manifest` with the trust repository each app is stamped with, `handle_app_config`, and `handle_publish_providers` over `collect_publish_providers` |
-| `routes_install.py` | `handle_install_app` (a local-path install), `handle_update_app` with the cron resync an update drives, and `handle_register_external` |
+| `routes_install.py` | `handle_install_app` (a local-path install), `handle_update_app` with the cron resync an update drives (`_resync_app_crons_after_update`, which the registry install routes also call over an installed app), and `handle_register_external` |
 | `routes_uninstall.py` | `handle_uninstall_app` and `handle_migrate_cleanup` over `_run_uninstall`, `handle_uninstall_preview`, and the bounded cron deregistration retry an uninstall uses (`_deregister_crons_with_retry`) |
 | `routes_enable.py` | `handle_enable_app`, `handle_disable_app` and `handle_open_app`: the built-in service sync (`_BUILTIN_SERVICE_APPS`, `_sync_builtin_config`, `_notify_builtin_service`), the client-install platform check (`_client_install_manifest`) and the desktop environment an `openCommand` launcher keeps |
 | `routes_registry.py` | Browsing, refreshing and installing from the app registry (`handle_registry`, `handle_registry_refresh`, `handle_registry_install`, `handle_registry_install_stream`) and the registry list in `config.json` (`handle_registries`, `handle_registries_refresh`, `_write_registries_config`) |
@@ -5660,8 +5790,7 @@ permissions under "declared by the publisher, not enforced" and the label
 "Community, not reviewed by Kiro Space". `complete_market_install(prepared,
 confirmed=True)` then calls `install_app(<folder>, expected_name=<listing
 name>, market_source=..., source_commit=...)` directly, never the dashboard
-local-path route (which registers the app and starts its backend after a fresh
-install). `install_app` writes `origin = "local"`, `source =
+local-path route. `install_app` writes `origin = "local"`, `source =
 "market:<ref>@<n>"` and `sourceCommit = <zip SHA-256>` in its FIRST record
 write, still `enabled = False`, so no record ever names the staging folder
 (which a local-folder grant would admit), and its install-time trust check
@@ -5812,7 +5941,10 @@ only remove first-party status, never grant it. It gates:
   `manager_lookup`, `manager_activation`, `bridges_crons`, `bridges_mcp`,
   `backend_runtime.startup`, `cron_sdk`, `backend`) resolves the data-home tree for
   a released name, and `is_builtin_app` and the PreToolUse first-party sets drop
-  it;
+  it; the same answer keeps the wheel's `agent_placeholders` module unimported for
+  any template naming only the host placeholder set
+  (`bridges_agents._shipped_builtin_placeholder_values`, §34), so the adopted
+  agents render from that set;
 - the core's packaged skill copies (`builtin_skills/`, `app: <name>` frontmatter),
   through `released_builtin_names` (only a pinned or marked name asked):
   `skills_builtin_sync._ensure_builtin_skills` neither installs nor updates a copy
@@ -6065,11 +6197,33 @@ through one seam that is empty by default:
   `KIROCREW_*` name; a malformed row raises at load, so a grant cannot silently stop
   applying. Only `BUILTIN_NAMES` is read: an installed or registry app can claim none
   of this, whatever its manifest says.
-- **Agent-template placeholders** (`bridges_agents._placeholder_values`). A built-in
-  whose shipped agent config names a runtime path ships `agent_placeholders.py` with a
-  `placeholder_values()` the gateway calls to compute them; a result that is not a
-  `{"{NAME}": str}` mapping is refused whole, and an app with no such module gets `{}`
-  (its template stays unrendered and unregistered).
+- **Agent-template placeholders** (`bridges_agents._placeholder_values`). Every app,
+  installed or built-in, gets the fixed host set of `apps/agent_template_values.py`:
+  `{APP_ROOT}` (the root its agents register from), `{APP_DATA}` (`apps/<name>/data`,
+  named, never created), `{UV_BIN}` (`env.resolve_uv`), `{HOST_PATH}` (the gateway's
+  `PATH`, plus the directory of a `soffice` that `soffice_discovery` finds at a fixed
+  Windows root while `PATH` misses it) and `{PATH_SEP}` (`os.pathsep`). The set is
+  frozen public App Kit surface, the same for every app and pinned by
+  `test_every_value_is_derived_from_the_data_home_and_the_root`: a new name is a change
+  to this contract and to the app-author table, never one app's request. LibreOffice
+  is the one host tool `{HOST_PATH}` carries off `PATH`, because the core locates it
+  for its own file-panel slide previews (`soffice_discovery`, below); a host tool the
+  core does not itself use is the app's to find. A value the
+  host cannot compute (no `uv`, an empty `{HOST_PATH}`) is left out. Every value is
+  computed in the gateway and none is read from a file, and rendering grants nothing:
+  the rendered config passes through the same MCP policy, tool ceiling and
+  auto-approve strip as one naming no placeholder. A built-in may also ship
+  `agent_placeholders.py` with a `placeholder_values()` that adds its own; a result
+  that is not a `{"{NAME}": str}` mapping is refused whole. While its wheel copy is the
+  one registering, every value is taken. For a released name (§33) the module is
+  imported only when a template names a placeholder outside the host set, and only
+  those names are taken from it: a tree adopted at an earlier pin (pptx-maker at
+  `8fa8a42`, whose agents name the built-in's own `{ENGINE_ROOT}` family) keeps its
+  agents while the wheel ships the package, and a tree naming the host set alone
+  never imports it, so it keeps registering once the package leaves core. A
+  placeholder neither source computes leaves the template unrendered and the agent
+  unregistered. App authors: `docs/app-kit/manifest-reference.md`
+  "Host paths in an agent file".
 
 A capability the core itself offers lives in the core, and an app that needs it too
 imports it there rather than the other way round: the file panel's slide previews and
@@ -6080,7 +6234,9 @@ PPTX Maker both find `soffice` (and its install hint) through
 or PPTX Maker.
 
 Writers: `apps/builtin_host_grants.py`, `apps/bridges_agents.py`,
-`apps/builtins/dev_fleet/host_grants.py`, `apps/builtins/pptx_maker/agent_placeholders.py`.
+`apps/agent_template_values.py`, `apps/builtins/dev_fleet/host_grants.py`,
+`apps/builtins/pptx_maker/agent_placeholders.py`. Tests:
+`test/test_app_agent_template_values.py`.
 
 ## Windows stale-backend cleanup capacity
 

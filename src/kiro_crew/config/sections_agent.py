@@ -728,7 +728,7 @@ class AgentConfig:
             "Session Sharing",
             "Subagents reuse a shared ACP runtime instead of spawning a fresh "
             "backend process per subagent. Reduces startup from ~3-5s to ~200ms "
-            "and memory from ~400MB to near-zero per subagent. Default ON for the "
+            "and memory from about 0.55 GB to near-zero per subagent. Default ON for the "
             "eligible backends (kiro-cli and codex); every other ACP backend "
             "ignores it and runs a dedicated process per subagent. Set false to "
             "opt an eligible backend back onto per-subagent processes.",
@@ -1193,6 +1193,15 @@ class AgentConfig:
             "multi-phase investigations, but it can never be disabled. Reaching "
             "the ceiling is no longer a data-loss event: every agent result "
             "completed before the cutoff is preserved on the run record.",
+        ),
+    )
+    kas_workflows: bool = field(
+        default=False,
+        metadata=_meta(
+            "Kiro Workflows on Kiro Agent",
+            "Developer opt-in to Kiro Agent's (KAS) own workflow engine, off by "
+            "default. This build has no surface that reads it yet, so setting it "
+            "changes nothing. No effect unless the backend is Kiro Agent.",
         ),
     )
     subagent_mem_buffer_pct: int = field(
