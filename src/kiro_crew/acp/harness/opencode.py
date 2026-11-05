@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import subprocess as subprocess_mod
+from collections.abc import Callable
 from typing import Any, Collection
 
 from kiro_crew import acp_tool_gate
@@ -665,22 +666,62 @@ def _verify_opencode_routing(
             "the resolved configuration could not be parsed",
             _opencode_readback_remedy(),
         )
+    issue, remedy, state = _judge_opencode_resolved(
+        resolved,
+        backend=backend,
+        config_content=config_content,
+        deny_rules=tuple(getattr(session, "_session_harness_deny_rules", ()) or ()),
+        unhonoured=getattr(session, "_session_mcp_unhonoured", frozenset()),
+        scrub=session._scrub_observed,
+    )
+    # Write the read-back state back onto the session, whatever the verdict: the
+    # turn-time hook matcher and a later re-projection read these even when the
+    # session is admitted. ``_judge_opencode_resolved`` fills each on every path it
+    # is knowable on.
+    for field, value in state.items():
+        setattr(session, field, value)
+    return issue, remedy
+
+
+def _judge_opencode_resolved(
+    resolved: dict,
+    *,
+    backend: str,
+    config_content: str,
+    deny_rules: tuple[str, ...],
+    unhonoured: frozenset[str],
+    scrub: Callable[[object], object],
+) -> tuple[str, str, dict[str, object]]:
+    """Judge an already-parsed resolved config; pure, touches no session object.
+
+    Split out of :func:`_verify_opencode_routing` so BOTH drivers reach it: the
+    per-session ``ProcessSession`` path (through the thin wrapper above) and the
+    shared ``AcpRuntime`` path (``OpencodeHarness.verify_session_routing``, which
+    builds the same env/argv from the live handle). Every judgement input is an
+    explicit parameter and every session field it would set is returned in *state*,
+    so this can be unit-tested on a plain dict.
+
+    *deny_rules* is the session's projected ``harness_deny_rules``; *unhonoured* the
+    servers the projection could not narrow; *scrub* redacts a reported value before
+    it is quoted. Returns ``(issue, remedy, state)`` where ``state`` maps the session
+    fields to write (``_opencode_config_mcp_servers``, ``_opencode_denies_unenforced``,
+    ``_opencode_native_mounts``), filled on every path they are knowable on.
+    """
+    setting_key, _required = acp_tool_gate.permission_setting_for(backend)
+    state: dict[str, object] = {}
     config_servers, servers_issue = _opencode_config_mcp_server_names(resolved)
     if servers_issue:
-        return servers_issue, _opencode_config_mcp_servers_remedy()
-    session._opencode_config_mcp_servers = config_servers
+        return servers_issue, _opencode_config_mcp_servers_remedy(), state
+    state["_opencode_config_mcp_servers"] = config_servers
     seeded_denies = _opencode_seeded_deny_rules(config_content, setting_key)
     # Which of Crew's deny rules the harness's own resolution keeps in force. A rule
     # that lost is normally not a refusal: the projection withholds its server.
-    session._opencode_denies_unenforced = _opencode_unenforced_denies(
-        resolved, setting_key, seeded_denies
-    )
+    denies_unenforced = _opencode_unenforced_denies(resolved, setting_key, seeded_denies)
+    state["_opencode_denies_unenforced"] = denies_unenforced
     # ...unless opencode mounts that server from its OWN config too. Withholding the
     # array element does not reach that mount, so the switched-off tool would stay
     # callable there: refuse the session instead.
-    lost = frozenset(getattr(session, "_session_harness_deny_rules", ()) or ()) - (
-        frozenset(seeded_denies) - session._opencode_denies_unenforced
-    )
+    lost = frozenset(deny_rules) - (frozenset(seeded_denies) - denies_unenforced)
     native = _opencode_native_servers_holding(resolved, lost)
     # A server the projection could not keep narrowed at all (a tool id the harness
     # re-maps to a builtin, so no rule exists) is matched by NAME: opencode registers
@@ -689,35 +730,36 @@ def _verify_opencode_routing(
     mounts: set[str] = {str(n) for n in raw_mounts} if isinstance(raw_mounts, dict) else set()
     # Kept so a later re-projection on this spawn is checked against the same native
     # mounts (see refuse_native_mount_of_unhonoured).
-    session._opencode_native_mounts = frozenset(mounts)
-    unhonoured: frozenset[str] = getattr(session, "_session_mcp_unhonoured", frozenset())
+    state["_opencode_native_mounts"] = frozenset(mounts)
     native = sorted(set(native) | (mounts & unhonoured))
     if native:
-        return _native_mount_refusal(session, native)
+        issue, remedy = _native_mount_refusal(native, scrub)
+        return issue, remedy, state
     top_level = resolved.get(setting_key)
     if seeded_denies and isinstance(top_level, dict):
         # Crew's own deny rules are judged above, so the routing check sees the value
         # the operator's sources and the seed's "*" leave behind.
         top_level = {k: v for k, v in top_level.items() if k not in seeded_denies}
     observed = _opencode_uniform_permission(top_level)
-    issue = acp_tool_gate.seeded_setting_issue(backend, session._scrub_observed(observed))
+    issue = acp_tool_gate.seeded_setting_issue(backend, scrub(observed))
     if issue:
-        return issue, _opencode_routing_remedy(backend, top_level)
+        return issue, _opencode_routing_remedy(backend, top_level), state
     # The top-level value is in force; now the per-agent overrides, which the
     # seed does not reach and which replace it for the agent they name. One
     # permissive agent is one agent whose tool calls never reach the host gate,
     # so the first such entry refuses the session and names the agent.
     agents = resolved.get("agent")
     for agent_name, agent_observed in _opencode_agent_permissions(resolved, setting_key):
-        issue = acp_tool_gate.seeded_setting_issue(backend, session._scrub_observed(agent_observed))
+        issue = acp_tool_gate.seeded_setting_issue(backend, scrub(agent_observed))
         if issue:
             entry = agents.get(agent_name) if isinstance(agents, dict) else None
             raw = entry.get(setting_key) if isinstance(entry, dict) else None
             return (
-                f"agent {session._scrub_observed(agent_name)!r} overrides it: {issue}",
+                f"agent {scrub(agent_name)!r} overrides it: {issue}",
                 _opencode_routing_remedy(backend, raw),
+                state,
             )
-    return "", ""
+    return "", "", state
 
 
 def _opencode_routing_remedy(backend: str, raw: object) -> str:
@@ -742,9 +784,16 @@ def _opencode_routing_remedy(backend: str, raw: object) -> str:
     )
 
 
-def _native_mount_refusal(session: ProcessSession, native: Collection[str]) -> tuple[str, str]:
-    """The refusal for a narrowed server opencode mounts from its own config."""
-    names = ", ".join(repr(session._scrub_observed(n)) for n in native)
+def _native_mount_refusal(
+    native: Collection[str], scrub: Callable[[object], object]
+) -> tuple[str, str]:
+    """The refusal for a narrowed server opencode mounts from its own config.
+
+    *scrub* redacts a reported name before it is quoted (``session._scrub_observed``
+    on the per-session path; the handle's equivalent on the shared runtime), passed
+    in rather than reached for so this stays free of any session object.
+    """
+    names = ", ".join(repr(scrub(n)) for n in native)
     return (
         f"a switched-off tool on {names} is not denied in the resolved config, and "
         "opencode mounts that server from its own config, where withholding it from "
@@ -783,7 +832,7 @@ def refuse_native_mount_of_unhonoured(session: ProcessSession) -> None:
     )
     if not native:
         return
-    issue, remedy = _native_mount_refusal(session, native)
+    issue, remedy = _native_mount_refusal(native, session._scrub_observed)
     try:
         acp_tool_gate.enforce_runtime_routing(ACP_BACKEND_OPENCODE, issue, remedy=remedy)
     except acp_tool_gate.ToolGateUnroutable as exc:
