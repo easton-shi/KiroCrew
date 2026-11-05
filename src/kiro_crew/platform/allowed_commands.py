@@ -352,11 +352,70 @@ def plain_command(command: object) -> bool:
     )
 
 
+#: The separators a chain of plain commands may use and still be granted, longest
+#: first so ``&&`` and ``||`` are read before a lone ``|``.
+CHAIN_SEPARATORS = ("&&", "||", ";", "|")
+
+#: Most commands one chain may hold and still be granted.
+MAX_CHAIN_COMMANDS = 16
+
+
+def chain_commands(command: object) -> tuple[str, ...] | None:
+    """The plain commands *command* chains with :data:`CHAIN_SEPARATORS`, or ``None``.
+
+    Split at EVERY separator, quoted or not, with the spaces around it dropped:
+    a quoted separator only splits the command further, and each part must then
+    pass on its own. ``None`` when a part is empty or not :func:`plain_command`
+    (so a lone ``&``, a redirect, a substitution or a newline still refuses the
+    whole command), when the command is too long, or past
+    :data:`MAX_CHAIN_COMMANDS` parts. A plain command is its own one part.
+    """
+    if not isinstance(command, str) or not command or len(command) > MAX_COMMAND_LENGTH:
+        return None
+    parts: list[str] = []
+    start = i = 0
+    while i < len(command):
+        sep = next((s for s in CHAIN_SEPARATORS if command.startswith(s, i)), "")
+        if sep:
+            parts.append(command[start:i])
+            i += len(sep)
+            start = i
+        else:
+            i += 1
+    parts.append(command[start:])
+    if len(parts) > 1:
+        parts = [p.strip(" ") for p in parts]
+    if len(parts) > MAX_CHAIN_COMMANDS or not all(plain_command(p) for p in parts):
+        return None
+    return tuple(parts)
+
+
+def chain_matches_all(raw_patterns: object, command: object) -> bool:
+    """Whether *command* is a plain command or a chain of them
+    (:func:`chain_commands`) and one of *raw_patterns* matches EVERY part whole.
+
+    kiro-cli asks about each command of a chain; a chain is granted only when each
+    one would be. One :data:`_MAX_MATCH_STEPS` budget covers the whole chain."""
+    parts = chain_commands(command)
+    if parts is None:
+        return False
+    budget = [_MAX_MATCH_STEPS]
+    patterns = [
+        p
+        for p in (
+            parse(raw) for raw in (raw_patterns if isinstance(raw_patterns, (list, tuple)) else ())
+        )
+        if p is not None
+    ]
+    return all(any(_match(p, part, budget) for p in patterns) for part in parts)
+
+
 #: What the person is told when an ``allowedCommands`` entry would match a command
 #: but the command's shell composition keeps it from being granted.
 COMPOSITION_NOTICE = (
-    "This command matches allowedCommands, but commands with |, >, <, &&, ;, $() "
-    "or backticks always ask. Run the script alone, or move the pipeline into the script."
+    "This command matches allowedCommands, but a chain (&&, ||, ;, |) runs without a "
+    "prompt only when every command in it matches, and >, <, $() or backticks always "
+    "ask. Run the script alone, or move the pipeline into the script."
 )
 
 #: Characters that end the leading simple command of a composed one.
