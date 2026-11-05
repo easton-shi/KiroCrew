@@ -135,6 +135,8 @@ async def load_session(
     # mirrored host's projection resolves the agent spec against this directory.
     session_work_dir = str(await self._session_work_dir(cwd))
     denied_tools: frozenset[tuple[str, str]] = frozenset()
+    harness_deny_rules: tuple[str, ...] = ()
+    session_mcp_unhonoured: frozenset[str] = frozenset()
     mirrored_snapshot: Any = None
     consumed_spec: Any = None
     ref_spec: Any = None
@@ -162,6 +164,8 @@ async def load_session(
         mcp_servers = mirrored.servers
         stub_token = mirrored.stub_token
         denied_tools = mirrored.denied_tools
+        harness_deny_rules = mirrored.harness_deny_rules
+        session_mcp_unhonoured = mirrored.unhonoured_servers
         mirrored_snapshot = mirrored.derived_spec_snapshot
         consumed_spec = mirrored.agent_spec
         ref_spec = mirrored.ref_spec
@@ -439,6 +443,10 @@ async def load_session(
     # Mirrors create_session: the resumed session re-declares the array, so it
     # re-derives the deny set that array came with and re-checks the generation.
     handle.spec_denied_tools = denied_tools
+    # The opencode routing's per-session inputs on the loaded handle, from the same
+    # projection. Empty (no-op) for every host that is not opencode.
+    handle.harness_deny_rules = harness_deny_rules
+    handle.session_mcp_unhonoured = session_mcp_unhonoured
     handle.consumed_agent_spec = consumed_spec
     handle.mirror_used = mirrored is not None
     # Mirrors create_session: the re-registered batch is what this session now

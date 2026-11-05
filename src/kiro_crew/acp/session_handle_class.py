@@ -656,6 +656,26 @@ class AcpSessionHandle:
         # ``_deny_spec_disabled_tool`` a single falsy read on those sessions.
         # Mirrors ``AcpClient._spec_denied_tools``.
         self.spec_denied_tools: frozenset[tuple[str, str]] = frozenset()
+        # The opencode routing's per-session inputs, set by the runtime from the SAME
+        # mirror projection as ``spec_denied_tools``. Both stay empty for every host
+        # that is not opencode (no mirror fills them), so the ``verify_session_routing``
+        # read-back that consumes them never runs anywhere else. They are the
+        # shared-runtime home of ``AcpClient._session_harness_deny_rules`` /
+        # ``_session_mcp_unhonoured``: the per-tool deny rules opencode's config is
+        # seeded with, and the servers whose narrowing could not be translated to a
+        # wire rule (matched against native mounts so one stays refused, not mounted
+        # with its switched-off tool live).
+        self.harness_deny_rules: tuple[str, ...] = ()
+        self.session_mcp_unhonoured: frozenset[str] = frozenset()
+        # What the opencode ``debug config`` read-back resolves for THIS session,
+        # written back by ``OpencodeHarness.verify_session_routing`` on every path it
+        # is knowable on (the shared-runtime counterpart of the ``_opencode_*`` fields
+        # the per-session adapter keeps). The turn-time hook matcher reads the MCP
+        # server names; the native-mount set guards a later re-projection. All three
+        # stay empty until a verified opencode session fills them.
+        self.opencode_config_mcp_servers: tuple[str, ...] = ()
+        self.opencode_denies_unenforced: frozenset[str] = frozenset()
+        self.opencode_native_mounts: frozenset[str] = frozenset()
         # The parsed agent spec this session's mirrored array was built from, set by
         # the runtime from the same projection. None on a host with no mirror. A
         # member session's loaded-check reads this, never a re-read of the file.
