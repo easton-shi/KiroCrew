@@ -39,6 +39,7 @@ from kiro_crew.dashboard import warm_task_brief_inputs as inputs
 from kiro_crew.dashboard.chat_utils import effective_session_key, slot_history_key
 from kiro_crew.dashboard.slot_preparing import preparing_message
 from kiro_crew.dashboard.slot_retention import _MAX_FOREGROUND_KEY
+from kiro_crew.dashboard.warm_task_brief_checking import checking_text
 from kiro_crew.dashboard.warm_task_brief_inputs import language_of as _language_of
 from kiro_crew.dashboard.warm_task_brief_inputs import parse_epoch as _parse_epoch
 from kiro_crew.dashboard.warm_task_brief_inputs import row_epoch as _row_epoch
@@ -1918,7 +1919,11 @@ async def _run_warm_task_brief(
     if digest == fresh.previous_facts and not inputs.assistant_spoke_since(fresh.turns, anchor):
         return _skip(slot.key, "unchanged")
     # The indicator marks no turn (the deferral reads ``slot.running``).
-    indicator.enter_context(preparing_message(state, slot))
+    # Its caption names what the brief checks; the goal is redacted whole, before the cut.
+    open_items = inputs.open_item_entries(fresh.work_items, anchor, work_item_is_terminal)
+    goal = _redact(_goal(fresh))
+    caption = checking_text(language, goal, len(live), len(open_items), fresh.running_workers)
+    indicator.enter_context(preparing_message(state, slot, caption, language))
     # Leaving now keeps the brief: only a typed row, a reset or a close cancels it.
     opened = getattr(state, "_warm_task_brief_opened", None)
     if isinstance(opened, set):
