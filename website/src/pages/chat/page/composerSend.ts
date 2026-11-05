@@ -377,6 +377,7 @@ export function useComposerSend({
         // No slot yet: the same pending pick the agent picker makes, and like
         // it, drop a model chosen for the previous agent (#2035).
         onPendingAgent: (name) => { setPendingAgent(name, 'template'); setPendingModel('') },
+        sendToFork: (key, prompt) => { if (!connected) return false; void send(prompt, key); return true },
       })
       if (slashResult.intercepted) {
         // Not a send either way: the staged quote stays staged for the real one

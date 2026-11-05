@@ -33,7 +33,7 @@ interface BusyTurnControlsOptions {
   slotRunning: boolean
   messages: ChatMessage[]
   transcriptAuthoritative: boolean
-  /** The page's send, for the busy-but-not-running case and nothing else. */
+  /** The page's send, for the busy-but-not-running case and a `/fork` prompt. */
   send: (optionText?: string, targetSlot?: string, steerNow?: boolean, isolated?: boolean) => Promise<boolean>
   /** The receipt-aware steer POST (turnActions.ts's `applySteerReceipt` adapter). */
   steerMutation: { mutate: (vars: SteerVars) => void }
@@ -53,7 +53,7 @@ interface BusyTurnControlsOptions {
   dispatch: AppDispatch
   /** Reports a refused slash command on the composer's notice, while its
    *  origin chat is still on screen (the restored text is then right below). */
-  onSlashRefused?: (res: { stage?: 'open' | 'turn' | 'agent'; error?: string }) => void
+  onSlashRefused?: (res: { stage?: 'open' | 'turn' | 'agent' | 'fork'; error?: string }) => void
 }
 
 /**
@@ -195,7 +195,7 @@ export function useBusyTurnControls({
       // so text the user typed in the meantime survives alongside the
       // recovered question (same contract as the hand-off paths).
       const originSlot = activeSlotRef.current
-      void interceptSlashCommand(cmdTxt, originSlot, dispatch).then(res => {
+      void interceptSlashCommand(cmdTxt, originSlot, dispatch, { sendToFork: (key, prompt) => { if (!connected) return false; void send(prompt, key); return true } }).then(res => {
         if (!res.intercepted || !res.failed || !originSlot) return
         const onScreen = originSlot === activeSlotRef.current && composerSlotRef.current === originSlot
         if (onScreen) {

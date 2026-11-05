@@ -23,16 +23,17 @@ import { ThemeProvider } from '../hooks/useTheme'
 import type { ChatSlot } from '../types'
 import type { RootState } from '../store'
 
-const { mockSideOpen, mockSideTurn, mockSendChat, mockChatSlotAgent } = vi.hoisted(() => ({
+const { mockSideOpen, mockSideTurn, mockSendChat, mockChatSlotAgent, mockForkChatSlot } = vi.hoisted(() => ({
   mockSideOpen: vi.fn().mockResolvedValue({ ok: true, open: true, messages: 0, last_run_id: '', created_at: '' }),
   mockSideTurn: vi.fn().mockResolvedValue({ ok: true, run_id: 'r1', messages: 1 }),
   mockSendChat: vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ok: true, steered: true }) }),
   mockChatSlotAgent: vi.fn().mockResolvedValue({ ok: true, agent: 'fable', agent_kind: 'template' }),
+  mockForkChatSlot: vi.fn(),
 }))
 
 vi.mock('../api/client', () => ({
   api: new Proxy(
-    { sideOpen: mockSideOpen, sideTurn: mockSideTurn, sendChat: mockSendChat, chatSlotAgent: mockChatSlotAgent },
+    { sideOpen: mockSideOpen, sideTurn: mockSideTurn, sendChat: mockSendChat, chatSlotAgent: mockChatSlotAgent, forkChatSlot: mockForkChatSlot },
     {
       get: (t, prop) => {
         if (prop in t) return (t as Record<string, unknown>)[prop as string]
@@ -275,6 +276,20 @@ describe('/side while a turn is running', () => {
     expect(notice).toHaveTextContent('a turn is in flight here')
     await waitFor(() => expect(input.value).toBe('/agent fable'))
     expect(store.getState().chat.agentSwitchNotice).toBeNull()
+  })
+
+  it('/fork <prompt> forks and sends the prompt into the fork, not into the running turn', async () => {
+    mockForkChatSlot.mockResolvedValue({ ok: true, key: 'chat-fork-busy', title: 'chat-fork-busy', messages: 1 })
+    const store = renderRunningChatPage()
+    const input = await screen.findByLabelText('Message input')
+    fireEvent.change(input, { target: { value: '/fork try the other branch' } })
+    await armRunning(store)
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(mockSendChat).toHaveBeenCalled())
+    expect(mockForkChatSlot).toHaveBeenCalledWith(SLOT, undefined, undefined, undefined, undefined)
+    expect(mockSendChat).toHaveBeenCalledTimes(1)
+    expect(mockSendChat.mock.calls[0][0]).toBe('try the other branch')
+    expect(mockSendChat.mock.calls[0][1]).toBe('chat-fork-busy')
   })
 
   it('/btw <message> rides the same interception — side turn, not steer', async () => {
