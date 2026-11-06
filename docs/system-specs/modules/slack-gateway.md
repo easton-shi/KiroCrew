@@ -104,7 +104,8 @@ must not expose its data-home path to channel readers.
 Native Slack uses the dispatcher's `_is_control_message` predicate before
 Shared Crew capacity admission. Bang commands, including owner-only `!yolo off`,
 and modifier-only messages keep their sender checks without waiting for model
-capacity. A privacy-modified prompt still needs capacity; model messages enter
+capacity. An OPTIONS answer (`interpret_commands=False`) is never a control here
+and waits for capacity. A privacy-modified prompt still needs capacity; model messages enter
 the full handler after admission, including its channel-policy checks.
 
 Native and transport Slack dispatch resolve persisted agent/project overrides
@@ -1393,6 +1394,7 @@ LLM responses ending with `[OPTIONS: choice1 | choice2 | choice3]` are rendered 
 3. `build_options_blocks()` creates one plain button per choice (max 10, five to an `actions` row; more wrap into a second row). A label over 75 characters is cut with `…`; the button `value` keeps the full choice. The last row ends in a ⋯ overflow menu with **Choose several…** (only when there are two or more choices). Every row carries the staleness token in its `block_id`; rows after the first add a `~<row>` suffix (`outbound.options_row_block_id`), which `decode_options_token` reads past.
 4. A button click → `_handle_options()` → `_answer_options()`. **Choose several…** → `_open_options_several()` opens a modal of checkboxes (option values are indices; the card is held under a nonce by `outbound.remember_options_several`), and its submission → `_handle_options_several_submission()` → `_answer_options()` with every picked index.
 5. `_answer_options()` is the one answer path: the staleness check, then the once-only claim under the message's edit lock, then the in-place edit that replaces the card's rows with `✅ <@user> chose <choice>[, …] · <time>` (`build_options_answered_blocks`), then the turn: the chosen button values joined with `, `, with an `[OPTIONS multi-select: …]` context entry. A superseded card is struck through and an already-answered one left alone; either way the clicker gets a private "Already answered." and nothing is sent.
+   The turn runs with `interpret_commands=False`, as on the transport channels: the model-authored choice reaches the agent, or the linked slot, as the answer, never as a `!` command, privacy modifier or keyword command (`status`, `sessions`, `spawn`, `run`, `cron`).
 6. Authorization is the dispatcher's allowed-user check for a click; the modal submission re-checks the same `is_allowed_user` and the `channels` governance gate before answering.
 
 Action IDs: `options_choice_<i>` (a choice), `options_several` (the ⋯ menu); modal callback `options_several_submit` (with `notify_on_close`, so Cancel frees the held card). A Send press on a checkbox card posted before this card replaced it (`options_submit`) gets a private "This card has expired"; its checkbox ticks (`options_checkboxes`) are ignored. When an OPTIONS card ends the footer, the Link to Dashboard button gets its own row, so answering the card leaves it in place.
@@ -1410,7 +1412,7 @@ An `OPTIONS_ACTION_PREFIX` element whose action ID is NOT a numbered card button
 1. Redact exfiltration URLs and credentials from the label, then attempt to replace matching elements in the source message with a context label.
 2. Post the redacted label as a visible reply in the source thread. A failed post aborts routing, so an agent turn never runs without its visible Slack message; `test_post_message_failure_aborts` locks that ordering.
 3. Redact and bound the payload per `_ACTION_PAYLOAD_CAP`, record the Slack access event, and build an `Action button clicked` context entry.
-4. Call `slack.handler.handle_message` with the source message's `thread_ts`, the new reply timestamp, the visible label, and `action_context`.
+4. Call `slack.handler.handle_message` with the source message's `thread_ts`, the new reply timestamp, the visible label, `action_context` and `interpret_commands=False` (the label is model-authored, so it never runs as a command).
 
 `ContextBuilder.build_message` appends a non-empty `action_context` ahead of the message text, so the payload arrives as context rather than displayed verbatim in the thread (`test_redaction_applied_to_payload`). In a bound code channel the answer is pinned to the channel's own session (`routing.action_answer_slot`) and its label posts top-level; that delivery goes through `maybe_route_linked_thread(turn_context=...)`, which seats the payload (marker-neutralized, framed as content rather than instructions) as the slot's pending context when the session is idle, so the row and the echo show only the label, and drops the entry when that turn's task ends without taking it (a Stop during admission, a command label, a refusal), so no later turn inherits it; when the session is busy it is appended to the queued entry's text. The source-message update is best-effort: `_route_action_to_session` logs and continues when `update_message` fails, so a successful route does not guarantee the original button was visually replaced.
 

@@ -560,11 +560,13 @@ async def closed_dashboard_owner_refused(
     slack: Any,
     reply_ts: str,
     owner: str | None = None,
+    interpret_commands: bool = True,
 ) -> bool:
     """Stop a reply whose thread belongs to a dashboard session (tab closed, so
     no live slot) whose recorded agent is not the pinned channel's.
 
-    Control commands still fall through. Only a ``dashboard:`` owner is checked;
+    Control commands still fall through, unless *interpret_commands* is off (an
+    OPTIONS answer), whose label would run as a turn there. Only a ``dashboard:`` owner is checked;
     a Slack-born owner keeps its routing. An owner whose execution record is
     missing or unreadable is refused, since its agent cannot be established.
     *owner* names the session a pinned route delivers to (an OPTIONS answer's
@@ -578,7 +580,7 @@ async def closed_dashboard_owner_refused(
         return False
     if owner is None:
         _first_word = text.strip().split(maxsplit=1)[0] if text.strip() else ""
-        if _first_word in _BANG_TO_SLASH or _is_sessions_keyword(text):
+        if interpret_commands and (_first_word in _BANG_TO_SLASH or _is_sessions_keyword(text)):
             return False
         sessions = getattr(_dashboard_state, "sessions", None)
         owner = sessions.get_session_for_thread(reply_ts) if sessions is not None else None
@@ -649,6 +651,7 @@ async def route_linked_thread(
     route_pinned: bool = False,
     user_meta: dict[str, Any] | None = None,
     turn_context: str | None = None,
+    interpret_commands: bool = True,
 ) -> LinkedRoute:
     """Route a Slack message to a linked dashboard slot, if one is linked.
 
@@ -697,7 +700,13 @@ async def route_linked_thread(
         # A pinned route with no live slot is checked by its caller, which
         # knows the session the answer is delivered to.
         if not route_pinned and await closed_dashboard_owner_refused(
-            text, session_key, user_id, channel, slack, reply_ts
+            text,
+            session_key,
+            user_id,
+            channel,
+            slack,
+            reply_ts,
+            interpret_commands=interpret_commands,
         ):
             return LinkedRoute.REFUSED
         return LinkedRoute.UNROUTED
@@ -721,13 +730,14 @@ async def route_linked_thread(
     # normal handling. The predicate matches the keyword branches exactly
     # (whole stripped, lower-cased message), so "sessions please" still routes
     # to the linked slot. Other keywords (status, spawn, cron, ...) remain
-    # link-routed on purpose. A pinned OPTIONS answer is exempt: its text is a
+    # link-routed on purpose. An OPTIONS answer (*interpret_commands* off) is
+    # exempt from both, and a pinned answer from ``sessions``: its text is a
     # selected label being DELIVERED to the conversation that asked, and
     # dropping it into the picker would strand that conversation forever.
     _first_word = text.strip().split(maxsplit=1)[0] if text.strip() else ""
-    if _first_word in _BANG_TO_SLASH:
+    if interpret_commands and _first_word in _BANG_TO_SLASH:
         return LinkedRoute.UNROUTED
-    if not route_pinned and _is_sessions_keyword(text):
+    if interpret_commands and not route_pinned and _is_sessions_keyword(text):
         return LinkedRoute.UNROUTED
     # An @mention leads the text of a mention event; for ``/agent <name>`` drop
     # it, so the slot's runner sees the command and switches the linked chat's
@@ -749,7 +759,13 @@ async def route_linked_thread(
             if _dashboard_state.get_linked_slot(
                 reply_ts
             ) is None and await closed_dashboard_owner_refused(
-                text, session_key, user_id, channel, slack, reply_ts
+                text,
+                session_key,
+                user_id,
+                channel,
+                slack,
+                reply_ts,
+                interpret_commands=interpret_commands,
             ):
                 return LinkedRoute.REFUSED
             return await route_linked_thread(
@@ -763,6 +779,7 @@ async def route_linked_thread(
                 route_pinned=True,
                 user_meta=user_meta,
                 turn_context=turn_context,
+                interpret_commands=interpret_commands,
             )
 
     # A channel pinned to an agent is served only by that agent. A slot on any
@@ -937,6 +954,7 @@ async def maybe_route_linked_thread(
     route_pinned: bool = False,
     user_meta: dict[str, Any] | None = None,
     turn_context: str | None = None,
+    interpret_commands: bool = True,
 ) -> bool:
     """:func:`route_linked_thread` for callers that only need to know whether
     the message was handled: True when routed OR refused (return without
@@ -953,5 +971,6 @@ async def maybe_route_linked_thread(
         route_pinned=route_pinned,
         user_meta=user_meta,
         turn_context=turn_context,
+        interpret_commands=interpret_commands,
     )
     return outcome is not LinkedRoute.UNROUTED
