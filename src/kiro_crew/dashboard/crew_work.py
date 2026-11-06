@@ -165,11 +165,15 @@ def summary_for_state(slot: str, state: Any) -> dict[str, Any] | None:
         nudge = get_instance()
     except Exception:  # pragma: no cover - no loop service reads as no loop
         nudge = None
-    return summarize(
+    summary = summarize(
         items,
         closed=lambda key: ledger_wake.worker_closed(state, key),
         looping=lambda key: ledger_wake.worker_looping(nudge, key),
     )
+    # The conductor's own live loop (its patrol) is what picks a stalled item up, so
+    # the row keeps a stall out of sight while it holds one. Same reading as a worker's.
+    summary["conductor_looping"] = ledger_wake.worker_looping(nudge, slot)
+    return summary
 
 
 def remember(board: str, value: Any, revision: int = 0) -> str | None:
@@ -275,7 +279,8 @@ def worker_loop_moved(worker_slot: str) -> None:
 
     Its loop is what ``is_stale`` reads as ``worker_looping``, and a loop change moves
     no ledger fold, so the boards holding an open item bound to *worker_slot* are
-    handed to the listener as if their items had moved. No I/O.
+    handed to the listener as if their items had moved. A conductor's own loop is its
+    board's ``conductor_looping``, so its own board is refreshed too. No I/O.
     """
     from kiro_crew.session_ledger_layout import ledger_key
 
@@ -286,7 +291,8 @@ def worker_loop_moved(worker_slot: str) -> None:
         boards = [
             slot
             for slot, items in _items.items()
-            if any(ledger_key(str(i.get("worker_session_key") or "")) == worker for i in items)
+            if ledger_key(slot) == worker
+            or any(ledger_key(str(i.get("worker_session_key") or "")) == worker for i in items)
         ]
     listener = _listener
     for slot in boards:
