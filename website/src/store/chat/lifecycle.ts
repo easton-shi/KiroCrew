@@ -7,6 +7,7 @@ import type { RootState } from '../index'
 import type { ChatSlot, SessionInfo } from '../../types'
 import { api } from '../../api/client'
 import { resolveDefaultMemoryMode } from '../../api/queryClient'
+import { gatewayRunsCrewMode } from '../../lib/crewMode'
 import { addSlotOptimistic, updateSlot } from '../dashboardSlice'
 import { paletteSize, resolveDefaultColor } from '../../utils/sessionColors'
 import { isChatPageSurface } from '../../utils/channelOrigin'
@@ -42,7 +43,7 @@ const configuredDefaultMemoryMode = () =>
 
 export const createSlot = createAsyncThunk<
   ChatSlot,
-  { agent?: string; agent_kind?: 'member' | 'template'; appAgentOwner?: string; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; sessionFolder?: boolean; defaultFolder?: boolean; prefill?: string; automatic?: boolean } | string | undefined,
+  { agent?: string; agent_kind?: 'member' | 'template'; appAgentOwner?: string; model?: string; mode?: string; memory_mode?: string; folder_id?: string | null; title?: string; color_index?: number | null; color_hex?: string | null; project?: string | null; activate?: boolean; sessionFolder?: boolean; defaultFolder?: boolean; crewModeDefault?: boolean; prefill?: string; automatic?: boolean } | string | undefined,
   { fulfilledMeta: Required<OriginMeta> & { activate: boolean; prefillStaged?: boolean; automatic?: boolean } }
 >(
   'chat/createSlot',
@@ -97,7 +98,14 @@ export const createSlot = createAsyncThunk<
     // entry points resolve the persisted preference here, before the first turn
     // can read or write memory.
     const memory_mode = requestedMemoryMode || await configuredDefaultMemoryMode()
-    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, agentKind, skipSessionFolder, appAgentOwner, useDefaultFolder)
+    // `crewModeDefault` is OPT-IN like `defaultFolder`: only the person's own New
+    // chat entry points pass it, so an app's launch or a hand-off never lands on
+    // the conductor. It is asked for only while this dashboard runs Ultra Mode
+    // (the preview on, a gateway with Crew Mode); the server decides the rest
+    // (`dashboard.new_chat_crew_mode`, and that no caller, folder pin or default
+    // folder pin chose an agent), so it never overrides a pinned agent.
+    const crewModeDefault = typeof opts === 'object' && opts.crewModeDefault === true && gatewayRunsCrewMode()
+    const slot = await api.createChatSlot(undefined, agent, model, mode, memory_mode, title, undefined, folderId || undefined, agentKind, skipSessionFolder, appAgentOwner, useDefaultFolder, crewModeDefault || undefined)
     const dashState = (getState() as RootState).dashboard
     // An explicit color (e.g. carried from a slot being recreated on a
     // mode switch) wins; otherwise fall back to the default-color policy.

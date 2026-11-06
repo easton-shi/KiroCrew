@@ -18537,6 +18537,8 @@
         "agent_model_pin_overrides_default": "El agente <agent/> fija su propio modelo <model/>. Solo los chats que se ejecutan como este agente y sin su propia elección de modelo usan ese modelo fijado. El botón «Nuevo chat» no. Más tarde puedes fijar otro modelo desde el selector de modelo del chat.",
         "agent_template_pin_overrides_default": "Los chats nuevos en el agente <agent/> usan <model/>, que viene de su plantilla de agente o del valor predeterminado del backend, no de este ajuste. Este agente no fija un modelo por sí mismo, así que aquí no hay nada que quitar. Para elegir uno, abre el selector de modelo del chat y fija un modelo en este agente.",
         "discovery": "Descubrir",
+        "new_chat_crew_mode": "Iniciar chats nuevos en Ultra Mode",
+        "new_chat_crew_mode_hint": "Los chats nuevos se abren con Ultra Mode ya activado. Aún puedes desactivarlo antes de tu primer mensaje. Solo se aplica a los chats persistentes en el agente predeterminado.",
         "rail_label": "Ajustes del chat",
         "side_panel": "Panel lateral",
         "side_panel_always_open": "Mantener abierto el panel lateral",

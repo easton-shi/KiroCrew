@@ -89,6 +89,38 @@ def _default_template_stamp(cfg: KiroCrewConfig) -> str:
     return dispatch_kiro_agent(default_template(cfg))
 
 
+def _starts_in_crew_mode(
+    cfg: KiroCrewConfig,
+    request: web.Request,
+    *,
+    name: object,
+    app: str,
+    mode: str,
+    memory_mode: str,
+    ephemeral: bool,
+    artifact: bool,
+    stamped_default: str,
+) -> bool:
+    """Whether an agent-less create asking for ``crew_mode_default`` starts on the
+    conductor (``dashboard.new_chat_crew_mode``).
+
+    The same chats the composer offers the Ultra Mode chip on: the owner's own
+    fresh dashboard chat (no app, no named slot, no hand-off), no chat mode, a
+    Persistent chat, and a default agent that is not itself a conductor, since a
+    chat on that default is already in Ultra Mode and the chip is not offered.
+    """
+    from kiro_crew import crew_mode
+
+    if not getattr(cfg.dashboard, "new_chat_crew_mode", False):
+        return False
+    if name or app or mode or ephemeral or artifact or memory_mode != "persistent":
+        return False
+    if not is_owner_dashboard_request(request):
+        return False
+    conductors = crew_mode.conductor_agents(cfg)
+    return stamped_default not in conductors and default_template(cfg) not in conductors
+
+
 def _created_slot_row(state: Any, request: web.Request, slot: Any) -> dict[str, Any]:
     """*slot*'s row for the create route's answer, rank-free for a scoped caller.
 
@@ -441,6 +473,41 @@ async def api_chat_slot_create(request: web.Request) -> web.Response:
     if cfg is not None and not agent:
         agent = await asyncio.to_thread(_default_template_stamp, cfg)
         agent_kind = "template"
+        # `dashboard.new_chat_crew_mode`: a person's own New chat, marked
+        # `crew_mode_default` by a dashboard whose Ultra Mode preview is on, is born
+        # on the conductor the composer's chip switches to. Decided here, after the
+        # default folder's pin, so only a chat nothing else chose an agent for
+        # (the caller, a folder pin) becomes Ultra Mode.
+        if body.get("crew_mode_default") is True and _starts_in_crew_mode(
+            cfg,
+            request,
+            name=name,
+            app=request_app,
+            mode=_mode,
+            memory_mode=memory_mode,
+            ephemeral=bool(body.get("ephemeral")),
+            artifact=bool(body.get("artifact")),
+            stamped_default=agent,
+        ):
+            from kiro_crew import crew_mode
+
+            conductor = crew_mode.crew_mode_agent(cfg)
+            # A conductor that does not resolve here would refuse the whole create
+            # below (`agent_choice_unavailable`): the person asked for a chat, so
+            # they get the plain one instead.
+            try:
+                conductor_bindings = await asyncio.to_thread(
+                    resolve_agent_bindings,
+                    cfg,
+                    conductor,
+                    validate_memory_files=False,
+                    selection_kind="template",
+                )
+            except Exception:
+                logger.warning("Ultra Mode conductor %r did not resolve", conductor, exc_info=True)
+            else:
+                if conductor_bindings.requested_resolved:
+                    agent = conductor
     # Normalize an agent nothing will dispatch to the one that WILL answer.
     # Otherwise the name is stored verbatim and resolve_agent_bindings silently
     # falls back to the default agent: the sidebar advertises the requested agent

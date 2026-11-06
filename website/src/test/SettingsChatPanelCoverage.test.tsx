@@ -108,6 +108,7 @@ import { resolveDefaultMemoryMode } from '../api/queryClient'
 import { MAX_MESSAGE_FONT_SIZE } from '../pages/chat/ChatSettings'
 import { DURABLE_PREF_KEYS } from '../lib/uiPrefs'
 import { useSettingHighlight } from '../hooks/useSettingHighlight'
+import { PREVIEW_CREW_MODE, setPreviewFlag } from '../utils/previewFlags'
 
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
@@ -518,6 +519,22 @@ describe('ChatPanel — Messages', () => {
     fireEvent.click(sw)
     await waitFor(() =>
       expect(updateDashboardConfigMock).toHaveBeenCalledWith({ [key]: true })
+    )
+  })
+
+  it('offers Start New Chats in Ultra Mode only with the Ultra Mode preview on, and persists it', async () => {
+    const label = 'Start New Chats in Ultra Mode'
+    const view = wrap('sessions')
+    await settledSwitch('Restore Sessions')
+    expect(screen.queryByRole('switch', { name: label })).not.toBeInTheDocument()
+    view.unmount()
+    setPreviewFlag(PREVIEW_CREW_MODE, true)
+    wrap('sessions')
+    const sw = await settledSwitch(label)
+    expect(sw).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(sw)
+    await waitFor(() =>
+      expect(updateDashboardConfigMock).toHaveBeenCalledWith({ new_chat_crew_mode: true })
     )
   })
 

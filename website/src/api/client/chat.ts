@@ -179,7 +179,7 @@ export function createChatEndpoints({ post, put, del, patch, j, jAccepted, jfetc
     },
     /** Create a chat slot on this machine. A session on a connected crew is
      *  created on that crew and opened through its window, never here. */
-    createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, artifact?: string, folder_id?: string, agent_kind?: 'member' | 'template', no_session_folder?: boolean, app_agent_owner?: string, default_folder?: boolean) => {
+    createChatSlot: async (name?: string, agent?: string, model?: string, mode?: string, memory_mode?: string, title?: string, artifact?: string, folder_id?: string, agent_kind?: 'member' | 'template', no_session_folder?: boolean, app_agent_owner?: string, default_folder?: boolean, crew_mode_default?: boolean) => {
       const resolvedMemoryMode = memory_mode ?? await resolveDefaultMemoryMode(
         () => fetch('/api/dashboard/config').then(j),
       )
@@ -204,6 +204,10 @@ export function createChatEndpoints({ post, put, del, patch, j, jAccepted, jfetc
         // The server decides whether one is set and still exists; an explicit
         // folder_id always wins there.
         ...(default_folder && !folder_id ? { default_folder: true } : {}),
+        // The person's own New chat on a dashboard that runs Ultra Mode: the
+        // server starts it on the conductor when `dashboard.new_chat_crew_mode`
+        // is on and nothing else chose an agent.
+        ...(crew_mode_default ? { crew_mode_default: true } : {}),
       }).then(j).then(takeSessionFolderNotice) as Promise<ChatSlot>
     },
     /** Inject silent background context into a slot — consumed on the next user
