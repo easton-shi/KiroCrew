@@ -1644,8 +1644,11 @@ def _format_acp_error_worded(
             # runtime, whose harnesses are the two on the host identity store.
             # The retry verdict stays hard-coded -- that is this arm's own finding
             # about the error, not sign-in advice.
+            #
+            # No "Your session has expired." lead: these signals also fire for a
+            # host that was never signed in, and the signed-out message is true
+            # in both cases.
             formatted = (
-                "Your session has expired. "
                 f"{host_auth.signed_out_message(backend)} "
                 "Retrying or switching models will not help — this is a "
                 "sign-in issue, not a backend error."
