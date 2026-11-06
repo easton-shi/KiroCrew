@@ -86,12 +86,17 @@ def _stored_cwd_is_hidden_scratch(stored_cwd: str, shared_scratch: object) -> bo
     exits at start-up with ``EPERM ... uv_cwd`` on macOS). The tree the spawn shares
     (``shared_scratch``) is re-exposed to it, so a cwd inside that one is kept. With the
     sandbox off (after the governance floor) nothing is hidden, so the cwd is kept too.
+    Native Windows applies no scratch-root mask at all: a Kiro spawn is delegated to
+    Kiro's own sandbox and Crew has no Windows sandbox backend, so the cwd is kept there.
     """
+    from kiro_crew import platform_compat
     from kiro_crew.agent_scratch import scratch_root
     from kiro_crew.sandbox_tiers import _clamp_sandbox_mode, configured_sandbox_mode
 
     path = Path(os.path.realpath(stored_cwd))
     if not path.is_relative_to(os.path.realpath(scratch_root())):
+        return False
+    if platform_compat.IS_WINDOWS:
         return False
     try:
         if _clamp_sandbox_mode(configured_sandbox_mode()) == "off":

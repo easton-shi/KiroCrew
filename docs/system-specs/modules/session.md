@@ -814,7 +814,9 @@ resumed cwd is the one the session map recorded, kept only while it is still a
 directory and is not inside an earlier process's scratch tree: the sandbox hides
 every scratch tree but the spawn's own (and a `shared_scratch` tree it is handed),
 so a child started there could not read its working directory. With
-`agent.sandbox` off after the governance floor nothing is hidden and the cwd is kept
+`agent.sandbox` off after the governance floor nothing is hidden and the cwd is kept,
+and so it is on native Windows, where a Kiro spawn is delegated to Kiro's own sandbox
+and no scratch-root mask is applied
 (`session_allocation_parts/get_or_create._stored_cwd_is_hidden_scratch`). The
 cwd may name a different project than the one the capabilities were saved in
 (a folder's project directory, for example). Startup is refused with
