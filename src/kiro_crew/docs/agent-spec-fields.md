@@ -428,7 +428,7 @@ The
 
 | Field | Type | Effect |
 |---|---|---|
-| `prompt` | str | The system prompt. A literal string, or a `file://` URI. On the markdown form the body wins over a frontmatter `prompt`. |
+| `prompt` | str | The system prompt. A literal string, or a `file://` URI. On the markdown form the body wins over a frontmatter `prompt`. kiro-cli's `systemPrompt` spelling is read when `prompt` is absent. |
 
 `file://` resolution is Crew's, in `resolve_prompt`, and applies on the **KAS path
 only** — the kiro-cli path never inlines a prompt because kiro-cli reads the file
@@ -436,7 +436,8 @@ itself:
 
 - a relative path is anchored to the agents directory and may use `..`
   (`file://../prompts/x.md`), as on kiro-cli;
-- an absolute path (and `~`) is accepted and resolved;
+- an absolute path (and `~`) is accepted and resolved; a relative one expands
+  `$VAR` and `${VAR}` first (`file://$HOME/p.md`), as kiro-cli does;
 - relative or absolute, the resolved path (symlinks followed) must not be a
   credential or governance location, `~/.config/gh`, the data home's
   `app_receipt_secret` or `session_token_*.sig`, `/proc`, `/sys` or `/dev` —
@@ -444,10 +445,11 @@ itself:
   over the wire, so a spec pointing at `/proc/<pid>/environ` would exfiltrate
   the gateway's environment (`acp/kas_prompt_paths.py`);
 - a spec from a project checkout's `.kiro/agents` is untrusted: its prompt must
-  be a relative path that stays inside that directory;
-- an empty or unreadable file is an error, not a fallback; the unreadable
-  error names the agents directory holding the spec and tells the user to fix
-  the `prompt`, delete the spec, or choose another agent;
+  be a relative path that stays inside that directory (a leading `$` counts as
+  rooted and is refused);
+- a missing, unreadable or empty file does not refuse the session: the agent
+  runs on KAS's default prompt, as kiro-cli runs it with no prompt, and a
+  session-start notice names the file (`kas_prompt.prompt_unread_notice`);
 - a missing or blank prompt is sent as `"prompt": ""`, so the agent runs on
   KAS's own default prompt alone, as it runs on kiro-cli's (#25320). KAS needs
   the key present, not non-empty: an entry without it is not registered and the

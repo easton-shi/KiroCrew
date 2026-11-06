@@ -175,11 +175,27 @@ async def test_with_no_project_spec_the_user_level_agent_is_projected(layout):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ref", ["file:///etc/hostname", "file://~/notes.md"])
+@pytest.mark.parametrize(
+    "ref",
+    ["file:///etc/hostname", "file://~/notes.md", "file://$HOME/notes.md", "file://${HOME}/n.md"],
+)
 async def test_a_project_prompt_may_not_name_a_file_outside_the_checkout(layout, ref):
     _user, checkout, project = layout
     _write(project, "proj", {"name": "proj", "prompt": ref})
 
+    with pytest.raises(AcpRuntimeError, match="inside that checkout"):
+        await _project("proj", checkout)
+
+
+@pytest.mark.asyncio
+async def test_a_project_system_prompt_is_the_prompt_under_the_same_path_rule(layout):
+    # kiro-cli's ``systemPrompt`` spelling: carried as the prompt, and its
+    # ``file://`` path is held to the checkout like ``prompt``'s.
+    _user, checkout, project = layout
+    _write(project, "proj", {"name": "proj", "systemPrompt": "from systemPrompt"})
+    assert (await _project("proj", checkout))["prompt"] == "from systemPrompt"
+
+    _write(project, "proj", {"name": "proj", "systemPrompt": "file:///etc/hostname"})
     with pytest.raises(AcpRuntimeError, match="inside that checkout"):
         await _project("proj", checkout)
 

@@ -57,6 +57,7 @@ from kiro_crew.acp.harness.base import (
 from kiro_crew.acp.kas_agents import KasAgentTranslationError
 from kiro_crew.acp.kas_app_identity import resolve_app_identity_launches
 from kiro_crew.acp.kas_host_auth import answer_get_access_token, vault_holds_identity_off_loop
+from kiro_crew.acp.kas_prompt import prompt_unread_notice, spec_prompt
 from kiro_crew.acp.kas_transport import (
     METHOD_KAS_AUTH_GET_ACCESS_TOKEN,
     build_kas_argv,
@@ -306,12 +307,17 @@ def resolve_projected_spec(
         raise KasAgentTranslationError(
             f"agent {agent!r} is declared by {work_dir}/.kiro/agents but that spec is unreadable"
         )
-    prompt = project.get("prompt")
+    prompt = spec_prompt(project)
+    if "prompt" not in project and prompt is not None:
+        # kiro-cli's ``systemPrompt`` spelling, carried as ``prompt`` so the path
+        # rules below and the honoured-keys filter apply to it.
+        project = {**project, "prompt": prompt}
     if isinstance(prompt, str) and prompt.startswith(kas_agents_mod._PROMPT_FILE_SCHEME):
         ref = prompt[len(kas_agents_mod._PROMPT_FILE_SCHEME) :]
         # ``anchor``, not ``is_absolute``: on Windows ``/etc/x`` is rooted without a
         # drive, so it is not absolute there yet still names a file outside the checkout.
-        if Path(ref).expanduser().anchor:
+        # A leading ``$`` is rooted too: kiro-cli reads ``$HOME/x`` as an absolute path.
+        if ref.startswith("$") or Path(ref).expanduser().anchor:
             raise KasAgentTranslationError(
                 f"agent {agent!r} is declared by a project checkout, so its prompt must be "
                 f"a path inside that checkout's .kiro/agents, not {ref!r}"
@@ -945,6 +951,7 @@ class KasHarness(MembershipHarness):
             # did not change has to compare against this snapshot rather than against a
             # fresh read of the file.
             withheld: kas_agents_mod.WithheldOut = {}
+            prompt_unread: list[Path] = []
             custom_agents = kas_agents_mod.build_kas_custom_agents(
                 prompt_dir,
                 agent,
@@ -955,6 +962,7 @@ class KasHarness(MembershipHarness):
                 session_key=session_key,
                 skill_scope_rules=_skill_scope_rules(agent, spec, prompt_dir, work_dir),
                 withheld_out=withheld,
+                prompt_unread_out=prompt_unread,
             )
             # Resolved HERE, in this thread, for the runtime's hoist: the managed
             # launch it stamps the session token onto comes from the ``kirocrew``
@@ -963,7 +971,14 @@ class KasHarness(MembershipHarness):
             apps = resolve_app_identity_launches(
                 custom_agents, agent, work_dir, kas_agents_mod.MANAGED_MCP_SERVER_NAMES
             )
-            notice = withheld_credentials_notice(withheld)
+            notice = "\n\n".join(
+                n
+                for n in (
+                    prompt_unread_notice(agent, prompt_unread),
+                    withheld_credentials_notice(withheld),
+                )
+                if n
+            )
             return custom_agents, snapshot, managed, apps, withdrawn, notice
 
         try:
