@@ -119,7 +119,7 @@ from kiro_crew.hooks import HOOK_EVENT_PRE_TOOL_USE, get_global_hook_store, pers
 from kiro_crew.mcp_cleanup import (
     KIROCREW_BIN_MCP_SERVERS,
     MCP_REGISTRY_TYPE,
-    mcp_entry_is_muted,
+    mcp_server_muted_in_any_store,
 )
 from kiro_crew.mcp_oauth_projection import (
     oauth_lost_keys,
@@ -723,29 +723,26 @@ def _project_mcp_servers(
         if not isinstance(name, str) or not name or not isinstance(entry, dict):
             continue
         managed = name in MANAGED_MCP_SERVER_NAMES
-        if mcp_entry_is_muted(entry):
-            # ``mcp_entry_is_muted`` is the shared launch-decision reading, so the
-            # gateway rewriter cannot wrap an entry this function would withhold --
-            # a wrapped name arrives as a stubbed name and is subtracted above,
-            # before any check here. A non-boolean is not coerced and not forwarded
-            # either: ``disabled: z.boolean()`` fails the wire schema, and a client
-            # agent that fails it is dropped WHOLE
-            # (``validateAndConvertClientCustomAgents`` logs
-            # ``client.agent.drop.invalid`` and moves on), so Crew injects its one
-            # agent and the session silently runs on KAS's default mode instead.
+        if mcp_server_muted_in_any_store(name, entry):
+            # Check whether the server is muted in any scope: its own entry, crew
+            # store, or kiro global. This closes the gap where a server declared
+            # in an agent file (write-protected) is muted via toggle (which writes
+            # disabled to crew store or kiro global) but still starts because the
+            # agent file entry itself has no ``disabled: true``.
             disabled = entry.get("disabled")
             logger.info(
                 "agent %r: not declaring MCP server %r — %s",
                 agent_id,
                 name,
                 (
-                    "the entry is disabled, and the customAgents wire schema "
-                    "accepts that flag and then discards it, so a declared entry "
-                    "would launch the server anyway"
-                    if disabled is True
-                    else "its 'disabled' value is not a boolean, so it is read as a "
-                    "mute rather than coerced; forwarding it would fail the wire "
-                    "schema and cost the session the whole injected agent"
+                    "the entry or a crew store / kiro global entry for it is "
+                    "disabled, and the customAgents wire schema accepts that flag "
+                    "and then discards it, so a declared entry would launch the "
+                    "server anyway"
+                    if disabled is True or disabled is False  # explicit bool
+                    else "its 'disabled' value in some scope is not a boolean, so "
+                    "it is read as a mute rather than coerced; forwarding it would "
+                    "fail the wire schema and cost the session the whole injected agent"
                 ),
             )
             continue

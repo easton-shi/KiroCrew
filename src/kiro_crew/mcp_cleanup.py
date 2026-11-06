@@ -107,6 +107,52 @@ def mcp_entries_muted(entries: Iterable[Any]) -> bool:
     return any(mcp_entry_is_muted(entry) for entry in entries)
 
 
+def mcp_server_muted_in_any_store(name: str, agent_entry: Any = None) -> bool:
+    """Whether *name* is muted in the crew store, kiro global, or *agent_entry*.
+
+    Reads ``~/.kiro/crew/mcp.json`` (crew store) and ``~/.kiro/settings/mcp.json``
+    (kiro global) to check whether the server is disabled in any scope. One mute
+    anywhere mutes the server. This is the cross-file check that closes the gap
+    where a server declared in an agent file (write-protected, no ``disabled: true``
+    there) is muted via toggle (which writes to crew store or kiro global).
+
+    *agent_entry* is the server's own entry from the agent spec being projected,
+    if any; when it is muted, that is returned without reading the files.
+
+    Returns ``True`` when any scope mutes it, ``False`` otherwise or on read error
+    (fail-open when the files cannot be read: a session that cannot check crew store
+    should not be refused).
+    """
+    if mcp_entry_is_muted(agent_entry):
+        return True
+    entries: list[Any] = []
+    # Crew store: <data home>/mcp.json, typically ~/.kiro/crew/mcp.json
+    try:
+        from kiro_crew.config.paths import data_home  # deferred: paths pulls config
+
+        crew_store = data_home() / "mcp.json"
+        if crew_store.is_file():
+            data = loads_user_json(crew_store.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                servers = data.get("mcpServers", {})
+                if isinstance(servers, dict) and name in servers:
+                    entries.append(servers[name])
+    except Exception:  # noqa: BLE001 -- fail-open: a read error should not block a session
+        logger.debug("could not read crew store mcp.json for mute check", exc_info=True)
+    # Kiro global: ~/.kiro/settings/mcp.json
+    try:
+        kiro_global = Path.home() / ".kiro" / "settings" / "mcp.json"
+        if kiro_global.is_file():
+            data = loads_user_json(kiro_global.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                servers = data.get("mcpServers", {})
+                if isinstance(servers, dict) and name in servers:
+                    entries.append(servers[name])
+    except Exception:  # noqa: BLE001 -- fail-open
+        logger.debug("could not read kiro global mcp.json for mute check", exc_info=True)
+    return mcp_entries_muted(entries)
+
+
 logger = logging.getLogger(__name__)
 
 

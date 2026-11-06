@@ -978,26 +978,16 @@ def session_mcp_server_is_disabled(
 ) -> bool:
     """Whether *name* is switched off WHOLE for a session running as *agent*.
 
-    The reading form of :func:`session_mcp_disabled_servers`, for a caller that holds
-    no parse of its own to pass in. ``AcpRuntime`` is that caller: it composes the
-    array for an ``ACP_BACKENDS_ACP_RUNTIME`` host, and half of those hosts have no
-    mirror to carry the answer down -- KAS projects through ``acp.kas_agents`` rather
-    than through an ``mcpServers`` array at all -- so a field on the mirrored
-    projection would answer for one of them and not the other.
-
-    One read of each source, which on a mirrored host is a SECOND read of files its
-    projection also read. The direction that costs is the safe one: a switch-off can
-    only ever switch off, so the window between two reads can withhold a mount whose
-    switch-off arrived a moment ago and can never mount one it missed. A caller that
-    HAS the parse uses :func:`session_mcp_disabled_servers` instead and keeps its
-    answers on one read.
-
-    Blocking (reads the agent spec and the global settings file); callers run it off
-    the event loop. Never raises: an unreadable source switches nothing off, the same
-    contract :func:`session_mcp_disabled_tools` keeps.
+    Blocking (reads agent spec, global settings, crew store); callers run it off the
+    event loop. Never raises: an unreadable source switches nothing off.
     """
     spec = _agent_spec_for(agent, work_dir) if agent else None
-    return name in session_mcp_disabled_servers(spec, _global_settings())
+    if name in session_mcp_disabled_servers(spec, _global_settings()):
+        return True
+    from kiro_crew.mcp_cleanup import mcp_server_muted_in_any_store
+
+    agent_entry = spec.get("mcpServers", {}).get(name) if isinstance(spec, dict) else None
+    return mcp_server_muted_in_any_store(name, agent_entry)
 
 
 def session_mcp_restricted_servers(disabled_tools: Collection[tuple[str, str]]) -> frozenset[str]:
