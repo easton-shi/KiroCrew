@@ -309,6 +309,8 @@ the session's ACP id, as `KIRO_SESSION_ID` in the environment and as
 them are left out. A subagent's Stop hooks get it too. Hooks-page hooks and
 other subagent events do not.
 
+Those agent spec hooks also read kiro-cli's own stdin names, so a script written for kiro-cli takes the same branch: `hook_event_name` in camelCase (`preToolUse`, `stop`), `tool_name` as kiro-cli names the tool (`shell`, `read`, `write`, or `@server/tool` for an MCP tool), `tool_tags`, and `assistant_response` on `stop`. `assistant_text` stays beside it. Hooks-page hooks and `~/.kiro/hooks` files keep the names above.
+
 **A hook does not inherit the gateway's environment.** The gateway process holds
 provider keys and tokens, so a hook subprocess gets an allowlisted slice instead
 — `PATH`, the home and temp directories, locale, TLS trust, and `KIROCREW_HOME`.
