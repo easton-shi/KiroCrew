@@ -9,6 +9,7 @@ removes it from the connection; these tests pin that it is removed anyway.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Dict, List
 
 import pytest
@@ -465,3 +466,60 @@ async def test_a_response_that_arrives_as_the_stream_is_cancelled_is_closed() ->
     # loopback connection after the stream's slot is released.
     assert ingress.closed == ["closed"]
     assert done == [stream.id]
+
+
+async def test_the_frames_email_and_name_reach_the_ingress() -> None:
+    """A checked head's display labels travel beside the request, never as copied headers."""
+    from kiro_crew.relay_client.ingress import IngressUnreachable
+    from kiro_crew.relay_client.protocol import parse_inbound
+
+    seen: List[Any] = []
+
+    class _Capture(_NeverIngress):
+        async def open_http(self, request: Any, body: Any) -> Any:
+            seen.append(request)
+            raise IngressUnreachable("stop here")
+
+        async def open_websocket(self, request: Any) -> Any:
+            seen.append(request)
+            raise IngressUnreachable("stop here")
+
+    async def send(frame: Dict[str, Any]) -> None:
+        return None
+
+    labels = {"userEmail": "renee@example.com", "userName": "Ren\u00e9e \u00d8"}
+    http = HttpStream(
+        parse_inbound(json.dumps(valid_message("frames/request", 0, **labels))),
+        send=send,
+        ingress=_Capture(),
+        on_done=lambda _sid: None,
+        credit=None,
+        first_byte_seconds=50.0,
+    )
+    ws = WsStream(
+        parse_inbound(json.dumps(valid_message("frames/ws-upgrade", **labels))),
+        send=send,
+        ingress=_Capture(),
+        on_done=lambda _sid: None,
+        pause_watchdog_seconds=3600.0,
+    )
+    for stream in (http, ws):
+        stream.start()
+        await await_until(asyncio.ensure_future(stream.wait()), what="the stream")
+    assert [(r.user_email, r.user_name) for r in seen] == [
+        ("renee@example.com", "Ren\u00e9e \u00d8"),
+        ("renee@example.com", "Ren\u00e9e \u00d8"),
+    ]
+    # A head without labels hands over empty ones.
+    seen.clear()
+    plain = HttpStream(
+        valid_message("frames/request", 0),
+        send=send,
+        ingress=_Capture(),
+        on_done=lambda _sid: None,
+        credit=None,
+        first_byte_seconds=50.0,
+    )
+    plain.start()
+    await await_until(asyncio.ensure_future(plain.wait()), what="the stream")
+    assert [(r.user_email, r.user_name) for r in seen] == [("", "")]
