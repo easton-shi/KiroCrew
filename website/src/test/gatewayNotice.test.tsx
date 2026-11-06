@@ -405,7 +405,7 @@ describe('wire parity with the gateway constants', () => {
   const metaKeys = sources.flatMap((py) => [...py.matchAll(/^(?:TRANSIENT|GATEWAY)_NOTICE_META_KEY\s*=\s*"([^"]+)"/gm)].map((m) => m[1]))
 
   it('finds every backend token and the one meta field name the frontend reads', () => {
-    expect(backend).toHaveLength(65)
+    expect(backend).toHaveLength(68)
     expect(new Set(metaKeys)).toEqual(new Set(['notice']))
   })
 
@@ -414,5 +414,48 @@ describe('wire parity with the gateway constants', () => {
       (role) => resolveGatewayNotice(msg(role, { content: 'x', meta: { notice: token } } as Partial<ChatMessage>), [], 0) !== null,
     )
     expect(resolvedOn).toHaveLength(1)
+  })
+})
+
+describe('the KAS signed-out row', () => {
+  const RELAY_WIRE =
+    "KAS runs through kiro-cli's relay. Not signed in to Kiro. Sign in from Settings → Agent Harness → Kiro sign-in, then start a new chat."
+  const relayRow = () =>
+    msg('error', { content: RELAY_WIRE, meta: { kind: 'auth_required', notice: 'kas_signed_out_relay' } } as Partial<ChatMessage>)
+
+  it('points at the sign-in button when the card has one', () => {
+    const row = relayRow()
+    renderWith(mergeRenderers(createTranscriptRenderers({ slot: 's1', onOpenSignIn: () => undefined })), row)
+    const card = screen.getByTestId('error-card')
+    expect(card).toHaveAttribute('data-auth-required', 'true')
+    expect(card).toHaveTextContent(GN.kas_signed_out_sign_in_below)
+    // The engine's route stays out of what the reader sees.
+    expect(card).not.toHaveTextContent(/relay|KAS/)
+    expect(screen.getByTestId('error-card-sign-in')).toBeInTheDocument()
+    cleanup()
+  })
+
+  it('names the Settings path on a surface with no sign-in button', () => {
+    const row = relayRow()
+    expect(resolveGatewayNotice(row, [row], 0)).toEqual({ text: GN.kas_signed_out, card: 'error' })
+    renderWith(defaultMessageRenderers, row)
+    expect(screen.getByTestId('error-card')).toHaveTextContent(GN.kas_signed_out)
+    expect(screen.queryByTestId('error-card-sign-in')).toBeNull()
+    cleanup()
+  })
+
+  it('recognises each sentence written before the token existed', () => {
+    const bare = msg('error', { content: 'Not signed in to Kiro. Sign in from Settings → Agent Harness → Kiro sign-in, then start a new chat.' })
+    const relay = msg('error', { content: RELAY_WIRE })
+    const bundle = msg('error', {
+      content:
+        "KAS runs on Kiro Crew's own engine because kiro-cli is not installed. Not signed in to Kiro. Sign in from Settings → Agent Harness → Kiro sign-in, then start a new chat.",
+    })
+    for (const row of [bare, relay, bundle]) expect(resolveGatewayNotice(row, [row], 0)?.text).toBe(GN.kas_signed_out)
+    // The launcher form names `kiro-cli login`, which the copy does not: it keeps its English.
+    const launcher = msg('error', {
+      content: "KAS runs through kiro-cli's relay, which needs kiro-cli's own sign-in. Run `kiro-cli login` in your terminal, then start a new chat.",
+    })
+    expect(resolveGatewayNotice(launcher, [launcher], 0)).toBeNull()
   })
 })

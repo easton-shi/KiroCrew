@@ -29,6 +29,17 @@ import re
 import types
 from pathlib import Path
 
+import pytest
+
+from kiro_crew.acp import kas_route
+from kiro_crew.acp.kas_route import (
+    REASON_CONFIGURED,
+    REASON_KIRO_CLI_LAUNCHER,
+    REASON_KIRO_CLI_SIGNED_OUT,
+    REASON_NO_KIRO_CLI,
+    KasRoute,
+)
+from kiro_crew.agent_sdk.backends import ACP_BACKEND_KAS
 from kiro_crew.messaging import empty_turn_copy
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -192,10 +203,10 @@ def _legacy_token(text: str) -> str | None:
 
 
 def test_token_tables_have_the_pinned_size() -> None:
-    # 3 transient-5xx tokens and 62 gateway tokens; a new row family moves both.
-    assert len(_backend_tokens()) == 65
-    assert len(_frontend_families()) == 65
-    assert len(_legacy_entries()) == 68
+    # 3 transient-5xx tokens and 65 gateway tokens; a new row family moves both.
+    assert len(_backend_tokens()) == 68
+    assert len(_frontend_families()) == 68
+    assert len(_legacy_entries()) == 71
 
 
 def _tokenized_literal_sites() -> list[tuple[str, int, str, str]]:
@@ -323,7 +334,7 @@ def test_every_cancelled_replay_wording_has_its_own_token() -> None:
 def test_localized_copy_avoids_internal_vocabulary() -> None:
     catalog = json.loads(_EN_CATALOG.read_text(encoding="utf-8"))
     copy = catalog["pages"]["chat"]["gatewayNotice"]
-    assert len(copy) == 64
+    assert len(copy) == 66
     for key, text in copy.items():
         lowered = text.lower()
         assert "hiccup" not in lowered and "backend" not in lowered, (key, text)
@@ -380,3 +391,48 @@ def test_gateway_notice_meta_shape() -> None:
     # Args ride beside it, under the field the frontend interpolates from.
     meta = gn.gateway_notice_meta(gn.GATEWAY_NOTICE_CONNECTION_LOST_GIVE_UP, exit_code=-9)
     assert meta == {"notice": "connection_lost_give_up", "notice_args": {"exit_code": -9}}
+
+
+@pytest.mark.parametrize(
+    ("route", "token"),
+    [
+        (None, "kas_signed_out"),
+        (KasRoute(bundle=False), "kas_signed_out_relay"),
+        (KasRoute(bundle=True, reason=REASON_NO_KIRO_CLI), "kas_signed_out_bundle"),
+        (KasRoute(bundle=True, reason=REASON_KIRO_CLI_SIGNED_OUT), "kas_signed_out_bundle"),
+        (KasRoute(bundle=True, reason=REASON_CONFIGURED), "kas_signed_out_bundle"),
+    ],
+)
+def test_kas_signed_out_row_carries_the_token_its_wording_maps_to(
+    monkeypatch: pytest.MonkeyPatch, route: KasRoute | None, token: str
+) -> None:
+    from kiro_crew.acp.transport_errors import AcpAuthRequired
+    from kiro_crew.agent_sdk.host_auth import signed_out_message
+    from kiro_crew.dashboard.chat_turn.recovery import _terminal_error_meta
+
+    monkeypatch.setattr(kas_route, "_LAST_SPAWN_ROUTE", route)
+    text = signed_out_message(ACP_BACKEND_KAS)
+    meta = _terminal_error_meta(AcpAuthRequired(text, backend=ACP_BACKEND_KAS))
+    assert meta == {"kind": "auth_required", "notice": token}
+    # A row written before the token existed carries only this English.
+    assert _legacy_token(text) == token
+
+
+def test_other_signed_out_wording_keeps_its_english(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kiro_crew.acp.transport_errors import AcpAuthRequired
+    from kiro_crew.agent_sdk.host_auth import signed_out_message
+    from kiro_crew.dashboard.chat_turn.recovery import _terminal_error_meta
+
+    # The launcher relay names `kiro-cli login`, which the translated copy does not.
+    launcher = KasRoute(bundle=False, reason=REASON_KIRO_CLI_LAUNCHER)
+    monkeypatch.setattr(kas_route, "_LAST_SPAWN_ROUTE", launcher)
+    text = signed_out_message(ACP_BACKEND_KAS)
+    assert "kiro-cli login" in text
+    meta = _terminal_error_meta(AcpAuthRequired(text, backend=ACP_BACKEND_KAS))
+    assert meta == {"kind": "auth_required"}
+    assert _legacy_token(text) is None
+    # A sentence written under another route than the live one is not re-labelled.
+    monkeypatch.setattr(kas_route, "_LAST_SPAWN_ROUTE", KasRoute(bundle=False))
+    bundle_text = f"{KasRoute(bundle=True, reason=REASON_CONFIGURED).describe()}. Not signed"
+    meta = _terminal_error_meta(AcpAuthRequired(bundle_text, backend=ACP_BACKEND_KAS))
+    assert meta == {"kind": "auth_required"}

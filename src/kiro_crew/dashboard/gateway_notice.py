@@ -113,6 +113,13 @@ GATEWAY_NOTICE_CODE_CHANNEL_WORKTREE_NOT_READY = "code_channel_worktree_not_read
 GATEWAY_NOTICE_REMOTE_CREW_READ_ONLY = "remote_crew_read_only"
 GATEWAY_NOTICE_ARCHIVE_FAILED_TURN_CANCELLED = "archive_failed_turn_cancelled"
 
+# The KAS signed-out ``error`` row (``kind = auth_required``), bare or led by the
+# route the engine took (``host_auth.kas_signed_out_route``). Its English is
+# ``host_auth.signed_out_message``; only the sentences that function names get one.
+GATEWAY_NOTICE_KAS_SIGNED_OUT = "kas_signed_out"
+GATEWAY_NOTICE_KAS_SIGNED_OUT_RELAY = "kas_signed_out_relay"
+GATEWAY_NOTICE_KAS_SIGNED_OUT_BUNDLE = "kas_signed_out_bundle"
+
 #: English fallback ``content`` for the recovery rows above. Plain language: no
 #: "backend", no "hiccup" (the parity test lints every ``GATEWAY_*_TEXT``).
 GATEWAY_CONNECTION_LOST_RETRYING_TEXT = "⟳ Connection lost — retrying…"

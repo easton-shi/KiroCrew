@@ -1049,6 +1049,27 @@ def signed_out_message(
     )
 
 
+def kas_signed_out_route(text: str) -> Optional[str]:
+    """Which KAS signed-out sentence *text* is, for a translated copy of it.
+
+    ``""`` when it is the bare sentence (no spawn has chosen a route), ``"relay"``
+    or ``"bundle"`` when it is led by that route, and ``None`` for anything else:
+    the launcher form that names ``kiro-cli login``, any other wording, or a
+    route that changed since the sentence was written. ``None`` keeps the English,
+    so a translation never says something the sentence did not.
+    """
+    if text == _KAS_SIGNED_OUT:
+        return ""
+    if text == signed_out_message(ACP_BACKEND_KAS):
+        import sys
+
+        kas_route = sys.modules.get("kiro_crew.acp.kas_route")
+        route = kas_route.last_spawn_route() if kas_route is not None else None
+        if route is not None and route.reason != "kiro_cli_launcher":
+            return route.name
+    return None
+
+
 def reports_signed_out(backend: str, text: str) -> bool:
     """Whether *text* is *backend*'s own answer for "not signed in / not configured".
 
