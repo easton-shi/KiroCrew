@@ -35,6 +35,7 @@ WHAT IS STILL OPEN (do not read this module as finished):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,40 @@ from kiro_crew.acp.types import (
 __all__ = ["PROTOCOL_VERSION_OPENCODE", "OpencodeHarness"]
 
 logger = logging.getLogger(__name__)
+
+
+class _HandleReadbackView:
+    """A read-only view of a shared-runtime handle, shaped like the session the
+    opencode read-back functions were written against.
+
+    The read-back and the version probe take the few things they read off a session
+    -- the work dir, the env overlays, the scrub, the projected deny inputs -- and write
+    their findings back as ``_opencode_*`` attributes. This supplies exactly those,
+    from the live handle and its runtime, and collects the findings so the caller
+    copies them onto the handle. It exists so the audited child-spawn sites stay in
+    one place rather than being duplicated for the shared path.
+    """
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+        self._extra_env: dict[str, str] = dict(handle._runtime._extra_env or {})
+        self._spawn_work_dir: str = handle._bound_cwd
+        self._session_harness_deny_rules: tuple[str, ...] = tuple(handle.harness_deny_rules)
+        self._session_mcp_unhonoured: frozenset[str] = frozenset(handle.session_mcp_unhonoured)
+        self._opencode_config_mcp_servers: tuple[str, ...] = ()
+        self._opencode_denies_unenforced: frozenset[str] = frozenset()
+        self._opencode_native_mounts: frozenset[str] = frozenset()
+
+    def _agent_env_for_spawn(self) -> dict[str, str]:
+        from kiro_crew.acp.agent_env import agent_env_overlay
+
+        return agent_env_overlay()
+
+    def _scrub_observed(self, value: object) -> object:
+        from kiro_crew.acp.client_permissions import _scrub_observed
+
+        return _scrub_observed(value)
+
 
 #: OpenCode answers ``initialize`` with an integer ``protocolVersion`` of 1 (the
 #: SPEC dialect), measured on opencode 1.19.5. Its OWN literal even though the int
@@ -183,6 +218,101 @@ class OpencodeHarness(MembershipHarness):
         """No -- opencode takes no ``--agent`` flag, so nothing is selected at spawn
         for a later ``set_mode`` check to confirm. Same answer as codex."""
         return False
+
+    # ── Per-session routing verification ──
+
+    def process_config_content(self) -> str:
+        """The ``OPENCODE_CONFIG_CONTENT`` seed of the SHARED process.
+
+        Process-level, so it carries no per-tool deny rules (those are per session
+        and the env is fixed at exec). The read-back verifies exactly this value, so
+        the spawn and the verification can never seed different documents.
+        """
+        from kiro_crew.acp.harness import opencode as opencode_mod
+
+        return opencode_mod._opencode_routing_config(self.backend, ())
+
+    async def verify_session_routing(self, handle: Any) -> None:
+        """Run opencode's own ``debug config`` read-back against THIS session.
+
+        The seed is process-level but the project config opencode resolves depends
+        on the session's work dir, so the verification that the asking posture is in
+        force happens here, per session, before its first prompt. Refusal raises
+        :class:`AcpToolGateUnroutable`, which ends the session instead of running it
+        with an unverified posture.
+
+        The judgement and both child runs are the per-session launch's own functions
+        (:mod:`kiro_crew.acp.harness.opencode`), reached through a read-only view of
+        the handle so the audited spawn sites exist once.
+        """
+        from kiro_crew import acp_tool_gate
+        from kiro_crew.acp import launch as launch_mod
+        from kiro_crew.acp.harness import opencode as opencode_mod
+        from kiro_crew.acp.transport_errors import AcpToolGateUnroutable
+        from kiro_crew.sandbox import wrap_argv, wrap_argv_async
+
+        if handle.harness_deny_rules:
+            # Per-tool deny rules live in the process-level config, which is shared by
+            # every session on this process, and session/new has already mounted the
+            # servers they narrow. Nothing can enforce them for this session alone, so
+            # the session is refused rather than run with a switched-off tool live.
+            raise AcpToolGateUnroutable(
+                f"{self.backend} launch refused: this session's agent switches off "
+                f"{len(handle.harness_deny_rules)} individual tool(s), and a shared "
+                "opencode process cannot enforce a per-tool deny for one session. "
+                "Remove the per-tool restriction from the agent, or use a per-session "
+                "opencode process."
+            )
+
+        runtime = handle._runtime
+        sandbox_mode = runtime.sandbox_mode
+        hidden = tuple(runtime.sandbox_hidden_dirs)
+        expose = acp_tool_gate.adapter_expose_files(self.backend, hidden)
+        opencode_bin = (await launch_mod.resolve_self_served_launch(self.backend))[0]
+        view = _HandleReadbackView(handle)
+
+        version_issue, version_remedy = await opencode_mod._opencode_version_refusal(
+            view,  # type: ignore[arg-type]
+            opencode_bin,
+            sandbox_mode=sandbox_mode,
+            hidden=hidden,
+            expose=expose,
+        )
+        if version_issue:
+            raise AcpToolGateUnroutable(
+                f"{self.backend} launch refused: {version_issue}. {version_remedy}"
+            )
+
+        config_content = self.process_config_content()
+        readback_argv, readback_cleanup = await wrap_argv_async(
+            [opencode_bin, *opencode_mod._OPENCODE_CONFIG_READBACK_ARGS],
+            mode=sandbox_mode,
+            strip_python_env=True,
+            extra_hidden_dirs=hidden,
+            extra_expose_files=expose,
+            _prepare=wrap_argv,
+        )
+        try:
+            issue, remedy = await asyncio.to_thread(
+                opencode_mod._verify_opencode_routing,
+                view,  # type: ignore[arg-type]
+                self.backend,
+                readback_argv,
+                config_content,
+            )
+        finally:
+            if readback_cleanup:
+                await asyncio.to_thread(launch_mod._unlink_readback_launcher, readback_cleanup)
+        # Recorded whatever the verdict: the turn-time hook matcher reads them even
+        # for an admitted session.
+        handle.opencode_config_mcp_servers = tuple(view._opencode_config_mcp_servers)
+        handle.opencode_denies_unenforced = frozenset(view._opencode_denies_unenforced)
+        handle.opencode_native_mounts = frozenset(view._opencode_native_mounts)
+        if issue:
+            try:
+                acp_tool_gate.enforce_runtime_routing(self.backend, issue, remedy=remedy)
+            except acp_tool_gate.ToolGateUnroutable as exc:
+                raise AcpToolGateUnroutable(str(exc)) from None
 
     # ── Seam 2: initialize ──
 
