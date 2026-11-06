@@ -456,9 +456,11 @@ def _quiet_audit(monkeypatch):
 
     class _Events(list):
         ops: list[str] = []
+        refusals: list[tuple] = []
 
     events = _Events()
     events.ops = []
+    events.refusals = []
 
     def _record(*, outcome, caller, detail="", critical=False, operation=None):
         events.append((outcome, caller, critical))
@@ -466,6 +468,7 @@ def _quiet_audit(monkeypatch):
         return True
 
     monkeypatch.setattr(handlers, "_audit", _record, raising=True)
+    monkeypatch.setattr(handlers, "audit_refusal", lambda *a: events.refusals.append(a[:2]))
     return events
 
 
@@ -692,3 +695,98 @@ class TestHandlers:
             'add_put("/api/security/credential-redaction", handlers.api_credential_redaction_put)'
             in src
         )
+
+
+# ---------------------------------------------------------- the governed host
+
+_GOVERNED = {"tools": {"mode": "deny", "deny": ["some_tool"]}}
+_OPT_IN = {"capabilities": {"credential_redaction_off": {"enabled": True}}}
+
+
+def _host_policy(monkeypatch, controls):
+    """Install the policy ceiling *controls* parse to (empty: no policy at all)."""
+    from types import SimpleNamespace
+
+    from kiro_crew.platform import context
+    from kiro_crew.platform.governance import parse_policy
+
+    policy = {"version": 1, "boot": {"fail_closed": True}, **controls}
+    ceiling = parse_policy(policy) if controls else None
+    monkeypatch.setattr(context, "current_context", lambda: SimpleNamespace(governance=ceiling))
+
+
+class TestGovernedHost:
+    """Where a policy governs any scope, only its opt-in lets the owner turn redaction off."""
+
+    @pytest.mark.asyncio
+    async def test_without_the_opt_in_a_stored_off_still_redacts_and_off_is_refused(
+        self, monkeypatch, _isolated_switch, _quiet_audit
+    ):
+        from kiro_crew.dashboard.handlers import files as files_handlers
+        from kiro_crew.dashboard.handlers import source_providers
+        from kiro_crew.dashboard.handlers.credential_redaction import api_credential_redaction_put
+
+        _off()
+        _host_policy(monkeypatch, _GOVERNED)
+        monkeypatch.setattr(source_providers, "owner_view_for_request", lambda req: True)
+        assert redaction_switch.read_state().enabled is True
+        assert await files_handlers._owner_view_bypasses_credential_pass({}) is False
+        before = _isolated_switch.read_bytes()
+        resp = await api_credential_redaction_put(_request(body={"enabled": False}))
+        assert resp.status == 403
+        assert json.loads(resp.text)["code"] == "credential_redaction_locked_by_policy"
+        assert _isolated_switch.read_bytes() == before
+        assert ("denied", "owner-1", False) in _quiet_audit
+        assert _quiet_audit.refusals == [
+            ("credential_redaction.write", redaction_switch.DISABLE_SCOPE)
+        ]
+        # The record is kept: an opt-in lets the owner's earlier OFF apply again.
+        _host_policy(monkeypatch, {**_GOVERNED, **_OPT_IN})
+        assert redaction_switch.read_state().enabled is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "controls, allowed",
+        [
+            ({}, True),
+            ({**_GOVERNED, **_OPT_IN}, True),
+            (_OPT_IN, True),
+            (_GOVERNED, False),
+            ({**_GOVERNED, "capabilities": {"credential_redaction_off": {}}}, False),
+        ],
+    )
+    async def test_only_the_policy_opt_in_lets_the_owner_turn_redaction_off(
+        self, monkeypatch, _isolated_switch, _quiet_audit, controls, allowed
+    ):
+        """Both sides: OFF lands and bypasses exactly when allowed; ON always lands."""
+        from kiro_crew.dashboard.handlers import files as files_handlers
+        from kiro_crew.dashboard.handlers import source_providers
+        from kiro_crew.dashboard.handlers.credential_redaction import api_credential_redaction_put
+
+        _host_policy(monkeypatch, controls)
+        monkeypatch.setattr(source_providers, "owner_view_for_request", lambda req: True)
+        off = await api_credential_redaction_put(_request(body={"enabled": False}))
+        assert off.status == (200 if allowed else 403)
+        assert await files_handlers._owner_view_bypasses_credential_pass({}) is allowed
+        on = await api_credential_redaction_put(_request(body={"enabled": True}))
+        assert on.status == 200
+        assert redaction_switch.read_state().enabled is True
+
+    @pytest.mark.parametrize("controls, allowed", [({}, False), (_OPT_IN, True)])
+    def test_an_enterprise_build_keeps_redaction_on_without_the_opt_in(
+        self, monkeypatch, controls, allowed
+    ):
+        monkeypatch.setattr("kiro_crew.edition.EDITION", "enterprise")
+        _host_policy(monkeypatch, controls)
+        assert redaction_switch.owner_may_disable() is allowed
+
+    def test_an_unreadable_ceiling_keeps_redaction_on(self, monkeypatch):
+        from kiro_crew.platform import context
+
+        def _broken():
+            raise RuntimeError("policy unreadable")
+
+        monkeypatch.setattr(context, "current_context", _broken)
+        _off()
+        assert redaction_switch.owner_may_disable() is False
+        assert redaction_switch.read_state().enabled is True

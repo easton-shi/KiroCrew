@@ -29,6 +29,7 @@ from aiohttp import web
 
 from kiro_crew.dashboard.handlers._shared import _owner_denial_response
 from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
+from kiro_crew.edition_locks import audit_refusal
 from kiro_crew.security import redaction_switch
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ _CODE_INVALID_JSON = "invalid_json"
 _CODE_INVALID_BODY = "invalid_body"
 _CODE_WRITE_FAILED = "credential_redaction_write_failed"
 _CODE_AUDIT_UNAVAILABLE = "credential_redaction_audit_unavailable"
+_CODE_LOCKED_BY_POLICY = "credential_redaction_locked_by_policy"
 
 _SOURCE = "credential-redaction"
 
@@ -108,7 +110,7 @@ async def _deny_non_owner(request: web.Request, operation: str) -> web.Response 
 
 
 async def api_credential_redaction_get(request: web.Request) -> web.Response:
-    """GET /api/security/credential-redaction -- the switch as recorded."""
+    """GET /api/security/credential-redaction -- the switch in force."""
     denied = await _deny_non_owner(request, "credential_redaction.read")
     if denied:
         return denied
@@ -131,7 +133,8 @@ async def api_credential_redaction_put(request: web.Request) -> web.Response:
 
     ``enabled`` must be a JSON boolean; anything else is a 400 and nothing is
     written. The record carries the time of the change so the card can say when
-    redaction was switched off.
+    redaction was switched off. OFF is a 403 when the governance policy does not
+    allow it (``redaction_switch.owner_may_disable``).
     """
     denied = await _deny_non_owner(request, "credential_redaction.write")
     if denied:
@@ -147,6 +150,15 @@ async def api_credential_redaction_put(request: web.Request) -> web.Response:
         )
     changed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     subject = str(request.get("user") or "owner")
+    if not enabled and not await asyncio.to_thread(redaction_switch.owner_may_disable):
+        reason = "this host's governance policy keeps credential redaction on"
+        await asyncio.to_thread(
+            _audit, outcome="denied", caller=subject, detail=f"credential_redaction.write: {reason}"
+        )
+        await asyncio.to_thread(
+            audit_refusal, "credential_redaction.write", redaction_switch.DISABLE_SCOPE, "", reason
+        )
+        return web.json_response({"error": reason, "code": _CODE_LOCKED_BY_POLICY}, status=403)
 
     def _write_and_audit() -> redaction_switch.RedactionState:
         # ONE unit of work on the worker thread: the audit record and the write,
