@@ -249,14 +249,18 @@ def _rearm_withheld_synthesis(state: Any, slot: Any) -> None:
     chat_runner._arm_synthesis_recheck(state, slot)
 
 
-async def _hand_back(state: Any, key: str, *, stopped: bool = True) -> str:
+async def _hand_back(
+    state: Any, key: str, *, stopped: bool = True, generation: int | None = None
+) -> str:
     """Continue *key* as its own Continue button would; drain its queue if one waits.
 
     A key the pause did not stop (*stopped* False: the root when it was idle, a
     member that was idle or waiting on the person) only has its held queue
     drained: it gets no Continue it never had a turn for. A queue restored from
     disk is never drained on its own, so a stopped turn is continued over it, as
-    the Continue button does.
+    the Continue button does. *generation* is the slot's ``_turn_generation``
+    read before the hold lifted: a turn this slot started since carries the
+    thread on, so it gets no Continue and is not held again while it runs.
     """
     from kiro_crew.dashboard import chat_handlers
     from kiro_crew.dashboard.state import load_window_off_loop
@@ -270,6 +274,10 @@ async def _hand_back(state: Any, key: str, *, stopped: bool = True) -> str:
         if not (slot.running or slot.linked_turn_running):
             break
         await asyncio.sleep(_SETTLE_STEP_SECS)
+    # A dispatch that ended without starting its turn moves the count too, so
+    # one marked since the read leaves the stopped turn owed.
+    if generation is not None and slot._unstarted_generation < generation < slot._turn_generation:
+        return "drained"
     if slot.running or slot.linked_turn_running:
         return "running"
     # A restored tab loads its window off the loop before anything reads it.
@@ -321,8 +329,16 @@ async def _resume(request: web.Request) -> web.Response:
     root = request.match_info.get("slot", "")
     await crew_pause.ensure_loaded()
     kind, _root_row = _live_root(_stamped_rows(state), root)
-    if kind != "crew" and crew_pause.record(root) is None:
+    held = crew_pause.record(root)
+    if kind != "crew" and held is None:
         return _not_root()
+    # Read while the hold stands: once it lifts, a stopped turn's own tail may
+    # start the next turn before its hand-back looks.
+    generations = {
+        key: slot._turn_generation
+        for key in (held or {}).get("stopped") or []
+        if (slot := state.get_slot(key)) is not None
+    }
     record = await asyncio.to_thread(crew_pause.resume, root)
     if record is None:
         return _bad("not_paused", "this crew is not paused", status=409)
@@ -338,8 +354,11 @@ async def _resume(request: web.Request) -> web.Response:
     )
     try:
         outcomes = await asyncio.gather(
-            _hand_back(state, root, stopped=root in stopped),
-            *(_hand_back(state, key, stopped=key in stopped) for key in keys),
+            _hand_back(state, root, stopped=root in stopped, generation=generations.get(root)),
+            *(
+                _hand_back(state, key, stopped=key in stopped, generation=generations.get(key))
+                for key in keys
+            ),
         )
     finally:
         crew_pause.forget_resuming(sorted(stopped))

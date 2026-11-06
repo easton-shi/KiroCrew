@@ -153,6 +153,8 @@ def _fake_slot(key: str, *, queued: int = 0) -> Any:
         is_closing=False,
         _stop_state="idle",
         window_pending=False,
+        _turn_generation=1,
+        _unstarted_generation=-1,
     )
 
 
@@ -819,6 +821,7 @@ async def test_a_pause_landing_while_a_patrol_prepares_holds_its_turn(monkeypatc
 async def test_continue_on_a_paused_root_points_at_the_board(tmp_path, monkeypatch):
     from chat_test_helpers import _make_state
 
+    from kiro_crew.dashboard import chat_handlers  # noqa: F401  (binds continue_turn's names)
     from kiro_crew.dashboard.chat_api.continue_turn import api_chat_slot_continue
 
     state = _make_state(tmp_path)
@@ -981,6 +984,58 @@ async def test_a_stopped_turn_still_tearing_down_stays_held_for_the_next_resume(
     again = await routes.handler.api_crew_resume(_req(_state(_TREE, slots)))
     assert json.loads(again.text)["resumed"] == {"w1": "continued"}
     assert crew_pause.record("root") is None
+
+
+@pytest.mark.parametrize("key", ["root", "w1"])
+@pytest.mark.parametrize("successor_running", [False, True])
+@pytest.mark.asyncio
+async def test_a_turn_that_starts_once_the_hold_lifts_is_not_continued_or_held_again(
+    routes, monkeypatch, key, successor_running
+):
+    monkeypatch.setattr(routes.handler, "_SETTLE_TRIES", 1)
+    monkeypatch.setattr(routes.handler, "_SETTLE_STEP_SECS", 0)
+    await routes.handler.api_crew_pause(_req(_state(_TREE)))
+    slots = {r["key"]: _fake_slot(r["key"]) for r in _TREE}
+    slot = slots[key] = _fake_slot(key, queued=1)
+    slot.running = True  # the stopped turn is still tearing down
+    real = crew_pause.resume
+
+    def _resume_then_tail_drains(root: str) -> Any:
+        rec = real(root)
+        # The hold is gone, so the stopped turn's own tail starts the queued
+        # message: it either finished inside the wait, or still runs past it.
+        slot._turn_generation += 1
+        slot._queue, slot.queue_depth, slot.running = [], 0, successor_running
+        return rec
+
+    monkeypatch.setattr(crew_pause, "resume", _resume_then_tail_drains)
+    body = json.loads((await routes.handler.api_crew_resume(_req(_state(_TREE, slots)))).text)
+    assert key not in routes.calls["continue"]
+    assert body["paused"] is False and not crew_pause.holds_turn(key)
+
+
+@pytest.mark.parametrize("later_dispatch", [0, 1])
+@pytest.mark.asyncio
+async def test_a_dispatch_that_ends_unstarted_once_the_hold_lifts_leaves_the_continue_owed(
+    routes, monkeypatch, later_dispatch
+):
+    await routes.handler.api_crew_pause(_req(_state(_TREE)))
+    slots = {r["key"]: _fake_slot(r["key"]) for r in _TREE}
+    w1 = slots["w1"]
+    real = crew_pause.resume
+
+    def _resume_then_a_dispatch_ends_unstarted(root: str) -> Any:
+        rec = real(root)
+        # The stopped dispatch itself, or a wake that took the free slot, ends
+        # before its turn starts; the queue hand-off that follows takes the slot.
+        w1._turn_generation += later_dispatch
+        w1._unstarted_generation = w1._turn_generation
+        w1._turn_generation += 1
+        return rec
+
+    monkeypatch.setattr(crew_pause, "resume", _resume_then_a_dispatch_ends_unstarted)
+    body = json.loads((await routes.handler.api_crew_resume(_req(_state(_TREE, slots)))).text)
+    assert body["resumed"]["w1"] == "continued"
 
 
 def test_a_refused_continue_on_the_last_owed_member_brings_the_record_back():
