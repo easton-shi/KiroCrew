@@ -328,6 +328,7 @@ def token_auth_middleware(
             _relay_refusal = admit_relay_caller(request, _relay_caller)
             if _relay_refusal is not None:
                 return _relay_refusal
+            await publish_actor(request, trust=None, serve_peer=None)
             return await handler(request)  # type: ignore[operator,no-any-return]
 
         # Forwarded-peer resolution (RFC §2), once per request — the WebSocket
