@@ -2,12 +2,13 @@
  *  reasoning, and tool calls, with the attention, recency, voice and
  *  run-status effects each one carries. */
 import { useMemo, type MutableRefObject } from 'react'
+import type { QueryClient } from '@tanstack/react-query'
 import { store, type AppDispatch } from '../../store'
 import { markSlotUnread } from '../../store/dashboardSlice'
 import { sseChatMessage, appendSlotMessage, setSlotStatusDetail, sseToolActivity, queueEntryQuote, queueEntryBanner, selectSlotToolLog } from '../../store/chatSlice'
 import { dispatchMcNotification, APPROVAL_KIND, shouldChimeOnPermissionRow } from '../notificationEvent'
 import { chatMessageMarksUnread, isMemberThreadSlot, memberThreadRowMarksUnread, noteMemberThreadRow, unreadWatermarkTs } from '../unreadOnAttention'
-import { isSlotMuted } from '../sessionMute'
+import { appsMutingSessions, isSlotMuted } from '../sessionMute'
 import { isTerminalErrorRow, noteTurnErrorRow, takeTurnErrored } from '../turnError'
 import { noteUnsavedRowTs } from '../../lib/slotReadRelay'
 import { emitThemeSound } from '../themeSound'
@@ -29,6 +30,7 @@ import { readRelay } from '../../pages/chat/sessionRelay'
 
 export interface ChatStreamDeps {
   dispatch: AppDispatch
+  queryClient: QueryClient
   buffers: StreamBuffers
   voice: VoicePlayback
   reconnectingRef: MutableRefObject<boolean>
@@ -42,7 +44,7 @@ export interface ChatStream {
   onToolCall(data: FrameData): void
 }
 
-export function useChatStream({ dispatch, buffers, voice, reconnectingRef }: ChatStreamDeps): ChatStream {
+export function useChatStream({ dispatch, queryClient, buffers, voice, reconnectingRef }: ChatStreamDeps): ChatStream {
   return useMemo<ChatStream>(() => ({
     onChatMessage(data) {
       buffers.flushChunks()
@@ -123,12 +125,12 @@ export function useChatStream({ dispatch, buffers, voice, reconnectingRef }: Cha
         const marks = isMemberThreadSlot(slot, slots)
           ? memberThreadRowMarksUnread(data.role, data.meta?.notice)
           : chatMessageMarksUnread(data.role, data.meta?.notice)
-        // Criterion 7: a muted session (per row or by its creator) never becomes
-        // unread from its own activity. This is the chat_message half of the
-        // two automatic markSlotUnread sites; turnCompletion.ts has the other.
-        // A terminal error row is exempt: the worker has stopped, and a
+        // Criterion 7: a muted session (per row, by its app or by its creator)
+        // never becomes unread from its own activity. This is the chat_message
+        // half of the two automatic markSlotUnread sites; turnCompletion.ts has
+        // the other. A terminal error row is exempt: the worker has stopped, and a
         // silenced failure stalls it unseen just as a silenced approval would.
-        if (marks && (!isSlotMuted(slots, slot) || isTerminalErrorRow(data))) {
+        if (marks && (!isSlotMuted(slots, slot, appsMutingSessions(queryClient.getQueryData(['kirocrewConfig']))) || isTerminalErrorRow(data))) {
           dispatch(batchedUnlessOpen(slot, markSlotUnread({ slot, ts: unreadWatermarkTs(data.role, data.ts), localTs: data.ts || undefined })))
         }
       })
@@ -322,5 +324,5 @@ export function useChatStream({ dispatch, buffers, voice, reconnectingRef }: Cha
       // tool message via slot.append and broadcasts it as 'chat_message'.
       // Dispatching here would insert a duplicate entry in the message list.
     },
-  }), [dispatch, buffers, voice, reconnectingRef])
+  }), [dispatch, queryClient, buffers, voice, reconnectingRef])
 }
