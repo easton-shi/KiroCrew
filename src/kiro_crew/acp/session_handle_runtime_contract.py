@@ -165,6 +165,18 @@ class AcpRuntimeProtocol(Protocol):
     """
 
     @property
+    def _harness(self) -> Any:
+        """This backend's strategy object, for the harness-owned per-session seam.
+
+        ``apply_session_permission_routing`` hands a ``VERIFIED_SEEDED_SETTINGS``
+        session to :meth:`verify_session_routing`, which only the harness can run
+        (it reads the host's own resolved config). Typed ``Any`` so this contract
+        stays free of the harness package's import cycle; the runtime's property
+        returns a ``HarnessAdapter``.
+        """
+        ...
+
+    @property
     def pid(self) -> int | None:
         """Subprocess pid (sandbox launcher parent under the Linux namespace
         sandbox) — the liveness oracle scans its descendant tree for evidence."""
