@@ -336,6 +336,7 @@ class OpencodeHarness(MembershipHarness):
         crew_panel: bool = False,
         session_key: str = "",
         worker_stub_names: frozenset[str] | None = None,
+        engine_features: frozenset[str] = frozenset(),
     ) -> SessionExtras:
         """Empty for now. opencode has no ``--agent`` custom-agent channel to register
         on, so like codex this carries no ``custom_agents``.
