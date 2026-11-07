@@ -29,6 +29,7 @@ error chains and tracebacks still name the path callers import it from.
 | `acp/runtime_start.py` | cold-start admission, `SessionStartGate` / `StartPermit`, `StartCollector` and the session-start timeouts |
 | `acp/launch.py` | the launch tail both drivers hand their plan to (`launch`): pod bundle swap, scratch window, sandbox wrap with the host's credential mask, cgroup scope, the child's environment and the suspended spawn; plus what several per-process hosts share before it -- the Node-adapter and self-served binary ladders, the resolution-cache generation fence, the enforced-host preflight and the read-back child plumbing |
 | `acp/harness/{claude,opencode,goose,pi,deepseek}.py` | one `ProcessAdapter` per host the client starts one process per session for (`process_adapter_for`): its binary resolution and caches, argv and labels, credential mask, gate sealing and routing read-back, and its additions to the child's environment |
+| `acp/harness/opencode_harness.py` | OpenCode's shared-runtime harness (`OpencodeHarness`, dormant until `ACP_BACKENDS_ACP_RUNTIME` names it): the process-scoped spawn plan, the uniform `OPENCODE_CONFIG_CONTENT` seed, and the per-session `verify_session_routing` read-back that runs after `session/new` and before the first prompt |
 
 `AcpClient`'s own behaviour lives in `acp/client_*.py` owner modules, one
 responsibility each. A member's body is a module-level function there whose first

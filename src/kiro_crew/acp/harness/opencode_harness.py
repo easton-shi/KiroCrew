@@ -17,20 +17,21 @@ by giving it a harness that fills the runtime's seams.
 
 WHAT IS STILL OPEN (do not read this module as finished):
 
-* Seam 1 (spawn) and the per-session permission read-back. OpenCode's asking
-  posture is established by seeding ``OPENCODE_CONFIG_CONTENT`` into the child and
-  reading the harness's own resolved config back from a short-lived child. On the
-  per-session adapter that runs inside ``resolve_spawn`` against a ``ProcessSession``.
-  On ``AcpRuntime`` the spawn has no session (``SpawnContext.session is None``) and
-  the process is shared, so the read-back is a PER-SESSION step that has to move onto
-  a per-session seam, reading the live ``AcpSessionHandle`` rather than a
-  ``ProcessSession``. Until that move lands, :meth:`resolve_spawn` here resolves only
-  the process-scoped half (binary, version gate, credential mask) and raises on the
-  session-scoped half so a half-wired session can never start ungated.
 * The capability-set membership (``ACP_BACKENDS_ACP_RUNTIME`` / ``SESSION_EVICTION``
-  / ``SESSION_SHARING``) is NOT flipped yet. This module exists first so the
-  registry can reach it and its seams can be tested before a session is routed here,
-  exactly as ``__init__.py`` documents for the registration-vs-routing split.
+  / ``SESSION_SHARING``) is NOT flipped yet, and the class is not registered in
+  ``_HARNESSES`` either: the contract tests pin registration to routing, so both
+  land together when a live ``session/close`` capture exists. Until then the class
+  is importable on its own and its seams are tested directly.
+* The per-session read-back runs AFTER ``session/new``, because the runtime has no
+  per-session spawn to run it in. A refusal therefore terminates a session that
+  already exists in the shared process rather than refusing before the process
+  starts; it still runs before the first prompt, and the create/load error path
+  already calls ``terminate_session``.
+* The permission seed is UNIFORM: ``OPENCODE_CONFIG_CONTENT`` is read once at exec,
+  so every session on this process verifies the same document. A session whose
+  projection asks for per-tool deny rules cannot be enforced on a shared process
+  and is refused by :meth:`OpencodeHarness.verify_session_routing` rather than run
+  with a switched-off tool live.
 """
 
 from __future__ import annotations
@@ -108,29 +109,23 @@ class OpencodeHarness(MembershipHarness):
 
     backend = ACP_BACKEND_OPENCODE
 
+    #: The exact ``OPENCODE_CONFIG_CONTENT`` this process was spawned with, captured
+    #: by :meth:`apply_spawn_env`. The per-session read-back verifies this value, not
+    #: a rebuild, so the spawn and the verification cannot seed different documents.
+    #: Empty until a spawn runs one; :meth:`process_config_content` then rebuilds it.
+    _config_content: str = ""
+
     # ── Seam 1: spawn ──
     #
-    # TODO(opencode-shared-runtime): this is the hard seam and it is NOT finished.
-    #
-    # The per-session OpencodeLaunch.resolve_spawn does five things, and only the
-    # first two are process-scoped and safe to run here:
-    #   (1) resolve the self-served binary + argv (process-scoped) -- move here;
-    #   (2) the credential-mask preflight + version gate (process-scoped, reads only
-    #       ctx.sandbox_mode/env and the resolved binary) -- move here;
-    #   (3) warm THIS session's MCP array (session._prepare_session_mcp)       -- per-session;
-    #   (4) seed OPENCODE_CONFIG_CONTENT and READ BACK the resolved config, which
-    #       mutates ProcessSession fields (_opencode_config_mcp_servers,
-    #       _opencode_denies_unenforced, _opencode_native_mounts, ...)          -- per-session;
-    #   (5) settle_opencode_denies / refuse_native_mount_of_unhonoured          -- per-session.
-    #
-    # On AcpRuntime SpawnContext.session is None and the process is shared, so (3)-(5)
-    # cannot run in resolve_spawn. They have to move onto a per-session seam that the
-    # runtime already calls with the live AcpSessionHandle (Seam 3 session_extras /
-    # the session-create projection hook), NOT an ``if backend == opencode`` branch on
-    # the shared path (harness-parity H13). Reuse the PURE helpers already in
-    # kiro_crew.acp.harness.opencode (_opencode_version_refusal,
-    # _opencode_routing_config, _verify_opencode_routing, the mask preflight) by
-    # importing them -- do not copy.
+    # OpenCode's asking posture has two halves, and only one is process-scoped:
+    #   (1) the self-served binary + argv and the credential-mask preflight --
+    #       ``ctx`` alone answers these, so they run here at spawn;
+    #   (2) the version gate and the permission read-back -- coupled to a session's
+    #       env/workdir, so they run per session on ``verify_session_routing``.
+    # The permission seed itself is process-level (``OPENCODE_CONFIG_CONTENT`` is
+    # read once at exec), so ``apply_spawn_env`` writes one uniform seed here; a
+    # session that needs per-tool deny rules is refused there rather than seeded
+    # differently.
 
     async def resolve_spawn(self, ctx: SpawnContext) -> SpawnPlan:
         """Resolve the PROCESS-SCOPED half of the launch: the self-served binary and
@@ -147,15 +142,10 @@ class OpencodeHarness(MembershipHarness):
           mask is the compensating control for the passive reads ACP v1 cannot make
           it ask about; an empty mask here is a missing control, not a simplification.
 
-        Deliberately NOT here (see the Seam 1 TODO above): the version gate and the
-        permission read-back. Both are coupled to a session's env/workdir
+        The version gate and the permission read-back need a session
         (``session._agent_env_for_spawn()``, ``session._extra_env``,
-        ``session._spawn_work_dir``) and the read-back mutates per-session state, so
-        they cannot run on a process-scoped spawn. Until they are moved onto a
-        per-session seam reading the live ``AcpSessionHandle``, this method REFUSES
-        rather than start a session whose asking posture was never established --
-        a half-wired opencode session would execute tool calls that never reach
-        Crew's gate.
+        ``session._spawn_work_dir``), so they run per session in
+        :meth:`verify_session_routing`, before the first prompt.
         """
         # Deferred imports: kiro_crew.acp.launch and kiro_crew.acp_tool_gate reach
         # back into the harness registry this module is part of, so both resolve at
@@ -173,26 +163,12 @@ class OpencodeHarness(MembershipHarness):
             launch_mod._sandbox_preflight, self.backend, ctx.sandbox_mode
         )
         expose = acp_tool_gate.adapter_expose_files(self.backend, hidden)
-
-        # TODO(opencode-shared-runtime): the version gate and the permission
-        # read-back run next on the per-session launch and both need a session.
-        # Move them to a per-session seam, then return the SpawnPlan below instead
-        # of raising. The mask is already resolved so it is carried on the plan when
-        # that lands:
-        #
-        #   return SpawnPlan(
-        #       argv=argv,
-        #       spawn_label=spawn_label,
-        #       stderr_label=stderr_label,
-        #       extra_hidden_dirs=hidden,
-        #       extra_expose_files=expose,
-        #   )
-        raise NotImplementedError(
-            "OpencodeHarness.resolve_spawn resolved the process-scoped half (binary, "
-            "argv, credential mask) but the per-session permission read-back is not "
-            "wired yet: an opencode session must not start on the shared runtime until "
-            "its asking posture is established on a per-session seam. "
-            f"(resolved argv={argv!r}, mask={len(hidden)} hidden dirs, {len(expose)} exposed)"
+        return SpawnPlan(
+            argv=argv,
+            spawn_label=spawn_label,
+            stderr_label=stderr_label,
+            extra_hidden_dirs=hidden,
+            extra_expose_files=expose,
         )
 
     def apply_spawn_env(
@@ -202,16 +178,31 @@ class OpencodeHarness(MembershipHarness):
         spawned_binary: str | None = None,
         cli_owned_auth: bool = False,
     ) -> None:
-        # TODO(opencode-shared-runtime): the per-session launch writes
-        # OPENCODE_CONFIG_CONTENT here from the read-back it verified. On the shared
-        # runtime that seed is per-session, not per-process, so this process-level
-        # hook is NOT where it belongs. Left as a no-op until the per-session seam
-        # carries the routing seed; opencode brings its own sign-in, so there is no
-        # kiro-cli API key to strip the way codex does.
-        raise NotImplementedError(
-            "OpencodeHarness.apply_spawn_env is not implemented yet: the routing seed "
-            "is per-session on the shared runtime and must travel on a session seam."
+        """Write the process-level permission seed into the child's environment.
+
+        ``OPENCODE_CONFIG_CONTENT`` is read once at exec, so every session on this
+        shared process verifies the same document. The seed therefore carries only
+        the required asking setting and no per-tool deny rules; a session whose
+        projection asks for those is refused per session instead of being seeded
+        differently (a per-tool deny cannot be scoped to one session's exec).
+
+        The ambient value is read from the environment this child is about to
+        receive, not from the gateway's own, so the merge sees exactly the source
+        the child will. It is captured on the harness for
+        :meth:`verify_session_routing`, which reads back the same document instead
+        of rebuilding it from a possibly-changed environment.
+
+        opencode brings its own sign-in, so there is no kiro-cli API key to strip
+        the way codex does.
+        """
+        from kiro_crew.acp.harness import opencode as opencode_mod
+
+        ambient = env.get(opencode_mod._ENV_OPENCODE_CONFIG_CONTENT, "")
+        self._config_content = opencode_mod._opencode_routing_config(
+            self.backend, (), ambient=ambient
         )
+        if self._config_content:
+            env[opencode_mod._ENV_OPENCODE_CONFIG_CONTENT] = self._config_content
 
     @property
     def verifies_agent_activation(self) -> bool:
@@ -225,9 +216,14 @@ class OpencodeHarness(MembershipHarness):
         """The ``OPENCODE_CONFIG_CONTENT`` seed of the SHARED process.
 
         Process-level, so it carries no per-tool deny rules (those are per session
-        and the env is fixed at exec). The read-back verifies exactly this value, so
-        the spawn and the verification can never seed different documents.
+        and the env is fixed at exec). Returns the value captured at spawn when
+        there was one, so the read-back verifies exactly the document the child
+        received rather than rebuilding it from an environment that may have moved.
+        A harness with no captured seed (a unit test, or a verification reached
+        before ``apply_spawn_env``) rebuilds the same uniform document.
         """
+        if self._config_content:
+            return self._config_content
         from kiro_crew.acp.harness import opencode as opencode_mod
 
         return opencode_mod._opencode_routing_config(self.backend, ())
@@ -344,12 +340,9 @@ class OpencodeHarness(MembershipHarness):
         """Empty for now. opencode has no ``--agent`` custom-agent channel to register
         on, so like codex this carries no ``custom_agents``.
 
-        TODO(opencode-shared-runtime): the per-session permission read-back that
-        OpencodeLaunch runs in resolve_spawn belongs on THIS seam (or the
-        session-create projection hook the runtime calls), because it needs the live
-        session, not a process. Verify the exact hook against runtime_session_create
-        before wiring it; until then this returns an empty payload and the
-        unimplemented spawn above keeps a session from starting ungated.
+        The per-session permission read-back is NOT here: it runs on the
+        ``verify_session_routing`` seam, which the runtime calls with the live
+        ``AcpSessionHandle`` after ``session/new`` and before the first prompt.
         """
         return SessionExtras()
 

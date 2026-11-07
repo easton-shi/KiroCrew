@@ -515,7 +515,12 @@ def _opencode_seeded_deny_rules(config_content: str, setting_key: str) -> tuple[
     )
 
 
-def _opencode_routing_config(backend: str, deny_rules: Collection[str] = ()) -> str:
+def _opencode_routing_config(
+    backend: str,
+    deny_rules: Collection[str] = (),
+    *,
+    ambient: str | None = None,
+) -> str:
     """The inline harness config that makes this session ask, as one env value.
 
     *deny_rules* are the tool ids the session's projection asks the harness itself to
@@ -527,10 +532,17 @@ def _opencode_routing_config(backend: str, deny_rules: Collection[str] = ()) -> 
     object is left out of the merge and said so in the log -- silently dropping
     an operator's config would be worse, and honouring an unparseable one is not
     possible.
+
+    *ambient* names the value to merge over. ``None`` reads the gateway's own
+    environment, which is right for the per-session launch (the seed is built
+    before that child exists). A caller that already holds the exact environment
+    it is about to hand the child passes it instead, so the merge cannot see a
+    different source than the child will.
     """
     setting_key, value = acp_tool_gate.permission_setting_for(backend)
     merged: dict[str, Any] = {}
-    ambient = os.environ.get(_ENV_OPENCODE_CONFIG_CONTENT) or ""
+    if ambient is None:
+        ambient = os.environ.get(_ENV_OPENCODE_CONFIG_CONTENT) or ""
     if ambient:
         try:
             parsed = json.loads(ambient)
