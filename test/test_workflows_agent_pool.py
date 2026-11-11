@@ -91,6 +91,14 @@ class _FakeSessions:
         self.order = getattr(self, "order", [])
         self.order.append("end_children")
 
+    async def run_identity_check(self):
+        # A reused worker's Kiro account check. ``retiring`` holds the keys the
+        # check would flag, the way a sweep flags a session its worker holds.
+        self.identity_checks = getattr(self, "identity_checks", 0) + 1
+
+    def is_retiring(self, key):
+        return key in getattr(self, "retiring", set())
+
     async def destroy(self, key):
         self.destroys = getattr(self, "destroys", 0) + 1
         self.live.pop(key, None)
@@ -600,6 +608,12 @@ class _ClockSessions:
     async def reset(self, key):
         self.live.pop(key, None)
 
+    async def run_identity_check(self):
+        return None
+
+    def is_retiring(self, key):
+        return False
+
 
 class _ClockProvider:
     def __init__(self, sessions: _ClockSessions, tag: str) -> None:
@@ -1081,6 +1095,52 @@ async def test_a_cancelled_call_waiting_for_a_lane_slot_leaves_no_queued_row(tmp
 
 
 @pytest.mark.asyncio
+async def test_a_call_cancelled_during_its_running_mark_frees_its_slot(tmp_path, monkeypatch):
+    """The cancel can also land after ``admit`` handed the call its slot and
+    before the call's own cancel arm: while the ``running`` mark is written. The
+    handle holds the lane slot and the row's lease there too, so the call ends
+    the row and gives the slot back instead of leaving the lane one slot short
+    for the life of the gateway."""
+    from kiro_crew.taskq import model as m
+    from kiro_crew.taskq.adapters.runner_handle import Admitted
+    from kiro_crew.taskq.store import TaskStore
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    store = TaskStore(tmp_path / "tasks.db", network_fs=False).open()
+    try:
+        ran: list[str] = []
+
+        async def _agent(prompt, opts):
+            ran.append(prompt)
+            return prompt
+
+        real_running = Admitted.running_async
+        marked, hold = asyncio.Event(), asyncio.Event()
+
+        async def _mark_then_hold(self, progress=None):
+            ok = await real_running(self, progress)
+            marked.set()
+            await hold.wait()  # the cancel lands here
+            return ok
+
+        monkeypatch.setattr(Admitted, "running_async", _mark_then_hold)
+        adm = _admission(1, store=store)
+        fn = admitted_agent_fn(_agent, adm, run_id="rm", session_key="chat:r")
+        call = asyncio.create_task(fn("p", {}))
+        await await_until(marked)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        row = store.get("workflow:rm:agent1")
+        assert row.state == m.CANCELLED and row.lease_owner is None
+        assert ran == []
+        assert adm.lane.running == 0 and adm.lane.waiting == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_call_parked_on_a_dependency_leaves_no_orphan_wait(tmp_path):
     """Same for a call parked in ``waiting_dependency``: the coroutine that was
     waiting for the scope's wake is the only thing that could have resumed it."""
@@ -1509,3 +1569,44 @@ async def test_a_worker_with_no_cheap_reset_cold_starts_on_reuse_and_says_so(cap
     ]
     assert len(cold) == 1, [r.getMessage() for r in caplog.records]
     assert "'opencode'" in cold[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_reused_worker_whose_session_the_account_check_flagged_takes_the_hard_reset():
+    """A worker holds its lease from its first task to its last, so it never acquires again.
+
+    Its reuse therefore runs the Kiro account check itself, and a session the check
+    flagged must not be handed the next task: the cheap path would keep the process,
+    and with it the previous account's credential. The hard reset ends that
+    conversation and re-acquires, which starts a session on the current account.
+    """
+    sessions = _FakeSessions()
+    worker = _WorkflowSessionWorker(
+        sessions, key="wf-pool:run-1:0", agent="kirocrew", model=None, cwd=None
+    )
+    await worker.start()
+    stale = sessions.live["wf-pool:run-1:0"]
+    sessions.retiring = {"wf-pool:run-1:0"}
+
+    await worker.reset()
+
+    assert sessions.identity_checks == 1
+    assert stale.new_conversation_calls == 0, "a flagged session took the cheap reuse path"
+    assert sessions.reset_intents == [True]
+    assert sessions.cold_starts == 2
+    assert worker._provider is sessions.live["wf-pool:run-1:0"]
+    assert worker._provider is not stale
+
+
+@pytest.mark.asyncio
+async def test_every_reuse_runs_the_account_check_and_a_healthy_session_stays_warm():
+    """Eight sequential calls: seven reuses, each with its own check, none of them a hard reset."""
+    sessions = _FakeSessions()
+    agent_fn, pool = build_pooled_agent_fn(sessions, run_id="r-check", max_workers=1)
+    for i in range(8):
+        await agent_fn(f"task-{i}", {})
+    await pool.shutdown()
+
+    assert sessions.identity_checks == 7
+    assert sessions.cold_starts == 1
+    assert sessions.resets == 0

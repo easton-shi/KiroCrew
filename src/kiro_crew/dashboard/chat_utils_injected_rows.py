@@ -216,6 +216,15 @@ EMPTY_TURN_NOTICE_KIND = "empty_turn"
 #: notice of any kind (the "crewmate chat draws messages only" decision record).
 SPEC_HOOKS_NOTICE_KIND = "spec_hooks"
 
+#: ``meta.spec_hooks_notice`` of the one :data:`SPEC_HOOKS_NOTICE_KIND` row that
+#: says nothing runs the agent spec's hooks on this backend. The dashboard offers
+#: a Dismiss link on this row alone and hides it by this value, so dismissing it
+#: hides no other notice of the kind (``website/src/pages/chat/SpecHooksNotice.tsx``).
+#: A row that names a ``preToolUse`` hook does not carry it, because such a hook
+#: is there to refuse calls. It changes only what the dashboard draws: which
+#: hooks run is decided elsewhere.
+SPEC_HOOKS_RUN_NOWHERE_NOTICE = "run_nowhere"
+
 #: ``meta.kind`` of the session-start notice that says Crew's tools are off in
 #: this session because a settings file Crew does not govern holds its path.
 #: Sessions draws it; crewmate chat drops it (``crewmateBubbles.isCrewmateChatRow``)
@@ -230,6 +239,16 @@ SEED_DECLINED_NOTICE_KIND = "seed_declined"
 #: rejection. No recovery is queued for this kind: a retry cannot earn an
 #: entitlement.
 MODEL_UNENTITLED_KIND = "model_unentitled"
+
+#: Row-level kind for the terminal `error` row that ends a spent retry ladder
+#: on a model the backend refused for capacity or a region rollout ("Model 'X'
+#: is unavailable on the backend right now"). The ladder already re-sent the
+#: turn to that model and the ``agent.fallback_model`` chain found nothing that
+#: served it, so the frontend offers the model picker instead of Resume, and
+#: ``is_turn_interrupted`` reads the row as the turn's settled ending: a Resume
+#: would send the same turn to the same refused model, and each failed new chat
+#: would otherwise sit in the sidebar as an interrupted session.
+MODEL_UNAVAILABLE_KIND = "model_unavailable"
 
 #: Row-level kind for the terminal `error` row an ``AcpAuthRequired`` turn
 #: produces (the agent process reported it is not signed in). Like
@@ -333,6 +352,26 @@ MCP_APP_MESSAGE_KIND = "mcp_app_message"
 #: runner-authored text into user-authored, persisted history).
 AUTOMATION_NOTICE_KIND = "automation_notice"
 
+#: The gateway's follow-up prompt after a chat-launched workflow's result lands
+#: (``server_runtime/workflow_startup``), asking the agent to answer the request
+#: that started the run. Runner-authored like the kinds above, so it drains as an
+#: ``inject`` row (``injectKind: workflow``), never the person's bubble.
+WORKFLOW_FOLLOWUP_KIND = "workflow_followup"
+
+#: A heartbeat task's prompt delivered with ``deliver:prompt:dashboard:<slot>``
+#: (``slack/gateway_runtime/result_egress``): ``<title>\n\n<result>``, which starts
+#: an agent turn in that chat. The gateway's words, like the follow-up above, so it
+#: drains as an ``inject`` row (``injectKind: heartbeat``), never the person's bubble.
+HEARTBEAT_PROMPT_KIND = "heartbeat_prompt"
+
+#: The gateway prompts ``_ChatSlot.enqueue_or_run_prompt`` can carry, each mapped
+#: to the ``injectKind`` of the row it writes on the run arm and drains to when
+#: queued, so both arms draw the same row.
+GATEWAY_PROMPT_INJECT_KINDS = {
+    WORKFLOW_FOLLOWUP_KIND: "workflow",
+    HEARTBEAT_PROMPT_KIND: "heartbeat",
+}
+
 #: Provenance banner wrapped around every app-originated message. Structural
 #: classification is by the queue entry's ``kind`` tag (unforgeable, set at
 #: enqueue time); the banner exists for the MODEL and the transcript reader,
@@ -351,6 +390,7 @@ _SYSTEM_INJECTION_KINDS = SUBAGENT_DELIVERY_KINDS | frozenset(
         MCP_APP_MESSAGE_KIND,
         AUTOMATION_NOTICE_KIND,
         FALSE_TOOL_BLOCKER_REPLAY_KIND,
+        *GATEWAY_PROMPT_INJECT_KINDS,
     )
 )
 
@@ -425,12 +465,14 @@ def is_synthetic_payload_item(item: dict) -> bool:
     An MCP-App message entry (``MCP_APP_MESSAGE_KIND``) is synthetic by the same
     asymmetry: its text is app-authored (server-authored), so mirroring it to a
     linked channel as the human's own words would attribute machine speech to a
-    person.
+    person. A gateway prompt (``GATEWAY_PROMPT_INJECT_KINDS``: a workflow follow-up,
+    a heartbeat prompt) is the gateway's own text, so it is synthetic too.
     """
     payload = item.get("payload")
     if payload:
         return payload == RecoveryPayload.CONTINUATION
-    if item.get("kind") == MCP_APP_MESSAGE_KIND:
+    kind = item.get("kind")
+    if kind == MCP_APP_MESSAGE_KIND or kind in GATEWAY_PROMPT_INJECT_KINDS:
         return True
     return is_synthetic_recovery_item(item)
 
@@ -458,6 +500,14 @@ def is_system_injection_item(item: dict) -> bool:
 #: have been delivered. The drain prefixes the turn's model input with
 #: ``STEER_POSSIBLY_DELIVERED_NOTE``; the user's row keeps the text as typed.
 STEER_POSSIBLY_DELIVERED_META = "steer_possibly_delivered"
+#: Queue-entry meta key: the ``mid`` of the transcript row a requeued steer
+#: ALREADY has. A steer the RPC accepted is persisted as a row at once; when the
+#: turn then ends without consuming it, that row is patched to ``requeued`` and
+#: the text is queued to run as its own turn. The drain reads this key, appends
+#: the turn's own row after the stop card, and then marks the existing row
+#: ``superseded`` so the client draws the text once. Queue plumbing only: the
+#: drain pops it, so it never reaches a row.
+REQUEUED_STEER_ROW_MID_META = "requeued_steer_row_mid"
 STEER_POSSIBLY_DELIVERED_NOTE = (
     "[The message below was sent into your previous turn, which then lost its "
     "backend connection before confirming it. It may already have been "

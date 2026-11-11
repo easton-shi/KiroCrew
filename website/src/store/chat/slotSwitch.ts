@@ -17,7 +17,7 @@ import { recentErrors, recordError, redactSecrets, type ErrorReport } from '../.
 import { chatSlotDetailPath } from '../../api/chatSlotPaths'
 import type { ChatState } from './state'
 import { fetchSlotDetail, isUnsafeKey, safeKey } from './wire'
-import { deduplicateByMid, finalizePageStreaming, floorForGen, olderHeadAbovePage, preserveSettledMcpOauth, preserveSettledStopState, preserveSettledUpsertRows, raiseChunkSeq, sameTranscript, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage } from './transcript'
+import { deduplicateByMid, finalizePageStreaming, floorForGen, olderHeadAbovePage, pageRegressesSupersededSteer, preserveSettledMcpOauth, preserveSettledStopState, preserveSettledUpsertRows, queueAfterSupersededDrain, raiseChunkSeq, sameTranscript, serverRowCount, snapshotChunkGen, snapshotChunkSeq, tailNotInPage } from './transcript'
 import { abortActiveOlderFetch, pagingCursorAfterKeptHead, slotCoverageShortfall, slotSwitchFetchLimit } from './paging'
 import { mergePreservedThinking, reinsertThinkingOrphans, type ThinkingAnchor } from './thinking'
 import { keepPendingCoordinatorApprovals } from './coordinatorApprovals'
@@ -68,12 +68,14 @@ import { persistedSendIds, pruneDeliveredAttempts } from './sendAttempts'
  *    the fork still opens, and one clicked before it does not take the view
  *    back (see `forkMayOpen`).
  *  - `gesture`: the user opened this session themselves, by a click, a key or
- *    a palette pick in this window. Only then does the landing record
+ *    a palette pick in this window. Only then does the switch record
  *    `ChatState.userOpen`, which reads that chat's cron notes (#23564).
  *    Opt-IN and separate from `announceOnMissing`: some announced switches
  *    are the page's own (a late `?sid=` recovery, a forwarded nav intent), and
- *    those must never count as the user having looked. */
-export type SwitchSlotArg = string | { key: string; keepTargetOnMissing?: boolean; announceOnMissing?: boolean; automatic?: boolean; requestSeq?: number; gesture?: boolean }
+ *    those must never count as the user having looked.
+ *  - `leaveSplit`: this open must replace Split View with the requested
+ *    session, because the grid may not contain it. */
+export type SwitchSlotArg = string | { key: string; keepTargetOnMissing?: boolean; announceOnMissing?: boolean; automatic?: boolean; requestSeq?: number; gesture?: boolean; leaveSplit?: boolean }
 
 /** The slot key of a `switchSlot` argument, in either spelling. Non-object
  *  values pass through untouched: a hand-rolled test dispatch can omit
@@ -490,6 +492,10 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       const openedBy = typeof switchArg?.requestSeq === 'number' ? switchArg.requestSeq : null
       enterActiveSlot(state, target, switchArg?.automatic === true ? true : openedBy !== null ? 'request' : false)
       if (openedBy !== null) state.activatedRequestSeq = Math.max(state.activatedRequestSeq ?? 0, openedBy)
+      // The user's open is recorded when it starts, so a leave while its
+      // transcript is still loading drops it as well (#24080).
+      if (switchArg?.gesture === true) state.userOpen = { key: target, seq: (state.userOpen?.seq ?? 0) + 1, landed: false }
+      if (switchArg?.leaveSplit === true) state.leaveSplitSeq = (state.leaveSplitSeq ?? 0) + 1
       if (target !== outgoingSlot) {
         state.lastChunkSeq = runs[safeKey(target)]?.lastChunkSeq
         state.lastChunkGen = runs[safeKey(target)]?.lastChunkGen
@@ -540,13 +546,33 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       const { key, messages: fetchedMessages, hasMore, queue, nextBefore } = action.payload
       if (isUnsafeKey(key)) return
       if (state.activeSlot !== key) return  // user switched away during fetch
-      // A user's open of this session has landed (see `ChatState.userOpen`).
+      // The user's open of this session has landed (see `ChatState.userOpen`):
+      // only its own gesture load, never a plain switch that superseded it.
       const openArg = action.meta?.arg
-      if (typeof openArg === 'object' && openArg !== null && openArg.gesture === true) {
-        state.userOpen = { key, seq: (state.userOpen?.seq ?? 0) + 1 }
+      if (typeof openArg === 'object' && openArg !== null && openArg.gesture === true && state.userOpen?.key === key) {
+        state.userOpen.landed = true
       }
       // A persisted row carrying a send's id proves that send was delivered.
       pruneDeliveredAttempts(state, key, persistedSendIds(fetchedMessages))
+      // A page from before a requeued steer drained would undo its retirement;
+      // the view `pending` restored is newer (see `pageRegressesSupersededSteer`).
+      // When that view holds the page's first row, keep it, and install the
+      // paging cursor this fetch owns: `pending` cleared it and nothing else
+      // sets it, so returning without it leaves the pane unable to page older.
+      // A view that does not reach the page's first row is older than the page,
+      // so the page applies, and `preserveSettledUpsertRows` below keeps the old
+      // row `superseded`.
+      const regressesSteer = pageRegressesSupersededSteer(state.messages, fetchedMessages)
+      if (regressesSteer) {
+        const kept = olderHeadAbovePage(state.messages.filter(m => m.role !== 'thinking'), fetchedMessages)
+        if (kept.cutIdx >= 0) {
+          const cursor = pagingCursorAfterKeptHead(hasMore, nextBefore, serverRowCount(kept.olderHead))
+          setPagingCursor(state, cursor.hasMore, cursor.nextBefore)
+          // The page's queue still merges in, as for a refresh.
+          state.messages = hydrateQueuedBubbles(state.messages, queueAfterSupersededDrain(state.messages, fetchedMessages, queue), true)
+          return
+        }
+      }
       const reportedRunning = action.payload.running
       const running = historyReportsRunning(state, key, reportedRunning, action.payload)
       const endedTurnHistory = reportedRunning && !running
@@ -754,7 +780,15 @@ export function addSlotSwitchCases(builder: ActionReducerMapBuilder<ChatState>):
       const reseated = reinsertThinkingOrphans(next, parked[safeKey(key)] ?? [], windowComplete)
       next = reseated.list
       parked[safeKey(key)] = [...reseated.remaining, ...orphaned]
-      next = hydrateQueuedBubbles(next, queue)
+      // A page that regresses a superseded steer was read before the drain
+      // popped that steer's queue entry, so its queue can still list the entry
+      // as waiting; drawn, the text would show a second time as a card whose
+      // Cancel and Edit act on nothing. That entry is dropped. The rest of the
+      // page's queue merges with the queued rows the view holds, which may be
+      // newer than the page.
+      next = regressesSteer
+        ? hydrateQueuedBubbles([...next, ...existing.filter(m => m.role === 'queued' && !next.includes(m))], queueAfterSupersededDrain(existing, fetchedMessages, queue), true)
+        : hydrateQueuedBubbles(next, queue)
       next = preserveSettledMcpOauth(existing, next)
       next = preserveSettledUpsertRows(existing, next)
       // A pending coordinator card lives only in this tab (see

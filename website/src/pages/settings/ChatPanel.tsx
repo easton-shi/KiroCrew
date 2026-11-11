@@ -6,6 +6,8 @@ import { SettingsSubNav, type SubNavItem } from '../../components/SettingsSubNav
 import { Btn } from '../../components/ui'
 import { MessageSquare, PenLine, Layers, PanelRight, Bot, UserRound, Sparkles, SlidersHorizontal } from 'lucide-react'
 import { usePersistedBool } from '../../hooks/usePersistedBool'
+import { useCrewMode } from '../../hooks/usePreviewFlag'
+import { FOLLOWUP_START_SENDS_KEY } from '../chat/followupStartSends'
 import { loadChatConfig, saveChatConfig, MIN_MESSAGE_FONT_SIZE, MAX_MESSAGE_FONT_SIZE, type ChatConfig, type ContentWidth, type DashboardConfig, type MemoryMode, type SendMode } from '../chat/ChatSettings'
 import { CARD_LINE_OPTIONS, isCardLineCount } from '../chat/cardLineCount'
 import { api } from '../../api/client'
@@ -20,7 +22,7 @@ import {
   VERBOSITY_OPTIONS, MEMORY_MODE_OPTIONS, FOLDER_ROOT_EXAMPLE, memoryModeLabels, asMemoryMode,
   asVerbosity, completionKeepLabels, COMPLETION_KEEP_CHARS_MIN, COMPLETION_KEEP_CHARS_MAX,
   COMPLETION_KEEP_CHARS_DEFAULT, type KirocrewConfigShape, COMPACT_CUSTOM, AUTOCOMPACT_PCT_MIN,
-  AUTOCOMPACT_PCT_MAX,
+  AUTOCOMPACT_PCT_MAX, PREFERRED_LANGUAGE_OPTIONS, preferredLanguageLabels, asPreferredLanguage,
 } from './chatPanelOptions'
 import { useChatPanelDashboard } from './useChatPanelDashboard'
 import { useChatPanelTypedFields } from './useChatPanelTypedFields'
@@ -29,6 +31,7 @@ import { AppModelsSection } from './AppModelsSection'
 import { FollowDefaultModelAction } from './FollowDefaultModelAction'
 import { KiroHarnessFallbackNote } from './KiroHarnessFallbackNote'
 import { DefaultSessionFolderSetting } from './DefaultSessionFolderSetting'
+import { FeatureTipsList } from './FeatureTipsList'
 import { usePlainDiff } from '../../hooks/usePlainDiff'
 import { useDiffSplit } from '../../hooks/useDiffSplit'
 import { EFFORT_LEVELS } from '../../lib/effort'
@@ -290,6 +293,8 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
   // is not in DURABLE_PREF_KEYS, so it stays on this device, like the diff
   // layout toggle above. The transcript reads the same key.
   const [copyOnSelect, setCopyOnSelect] = usePersistedBool('mc-chat-copy-on-select', false)
+  // Browser-local and outside the uiPrefs host backup on purpose: see followupStartSends.ts.
+  const [followupStartSends, setFollowupStartSends] = usePersistedBool(FOLLOWUP_START_SENDS_KEY, false)
 
   // ── Local chat config (localStorage) ──
   const setChat = useCallback(<K extends keyof ChatConfig>(k: K, v: ChatConfig[K]) => {
@@ -319,6 +324,9 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
   }
 
   const dashDisabled = !dashQ.isSuccess
+  // The Ultra Mode default is shown only while its preview is on: off, no chat
+  // offers Ultra Mode, so the setting would change nothing.
+  const crewModePreview = useCrewMode()
 
   // Second-level rail groups. Order = rail order; the first item (Transcript)
   // is what the pane shows by default. Every setting the old single scroll held
@@ -918,11 +926,13 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
             onChange={v => setBusyDefault(v as BusySendMode)}
           />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.quick_send')} hint={i18nT('pages.settings.chatPanel.click_a_suggested_reply_to_send_it_instantly', { mod: isMac ? '⇧' : 'Shift' })} checked={dashCfg.quick_send} onChange={v => setDash({ quick_send: v })} disabled={dashDisabled} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.followup_start_sends')} hint={i18nT('pages.settings.chatPanel.followup_start_sends_hint')} checked={followupStartSends} onChange={setFollowupStartSends} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.merge_queued_messages')} hint={i18nT('pages.settings.chatPanel.combine_follow_up_messages_into_a_single_labeled')} checked={dashCfg.merge_queued_messages} onChange={v => setDash({ merge_queued_messages: v })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.arrow_key_prompt_history')} hint={i18nT('pages.settings.chatPanel.arrow_key_prompt_history_desc')} checked={chatCfg.arrowKeyPromptHistory} onChange={v => setChat('arrowKeyPromptHistory', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.spellcheck_input')} hint={i18nT('pages.settings.chatPanel.spellcheck_input_desc')} checked={chatCfg.spellcheck} onChange={v => setChat('spellcheck', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.inline_markdown_input')} hint={i18nT('pages.settings.chatPanel.inline_markdown_input_desc')} checked={chatCfg.inlineMarkdown} onChange={v => setChat('inlineMarkdown', v)} />
-          <SettingsToggle label={i18nT('pages.settings.chatPanel.optimize_before_sending')} hint={i18nT('pages.settings.chatPanel.optimize_before_sending_desc', { chord: platformShortcut('Cmd+Z') })} checked={chatCfg.optimizeBeforeSend} onChange={v => setChat('optimizeBeforeSend', v)} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.show_optimize_prompt')} hint={i18nT('pages.settings.chatPanel.show_optimize_prompt_desc', { chord: platformShortcut('Cmd+Shift+Enter') })} checked={chatCfg.showOptimizePrompt} onChange={v => setChat('showOptimizePrompt', v)} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.optimize_before_sending')} hint={i18nT('pages.settings.chatPanel.optimize_before_sending_desc', { chord: platformShortcut('Cmd+Z') })} checked={chatCfg.optimizeBeforeSend} onChange={v => setChat('optimizeBeforeSend', v)} disabled={!chatCfg.showOptimizePrompt} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.show_pasted_text_in_full')} description={i18nT('pages.settings.chatPanel.show_pasted_text_in_full_desc_summary')} hint={i18nT('pages.settings.chatPanel.show_pasted_text_in_full_desc', { chord: platformShortcut('Cmd+Shift+V') })} checked={chatCfg.showFullPastes} onChange={v => setChat('showFullPastes', v)} />
           <SettingsButtonGroup label={i18nT('pages.settings.chatPanel.follow_up_bar_layout')} hint={i18nT('pages.settings.chatPanel.multiline_wraps_suggestions_onto_multiple_rows_s')} value={chatCfg.followUpLayout} options={[{ value: "multiline", label: i18nT('pages.settings.chatPanel.multiline') }, { value: "scroll", label: i18nT('pages.settings.chatPanel.single_line') }]} onChange={v => setChat('followUpLayout', v as ChatConfig['followUpLayout'])} />
           <SettingsInput
@@ -1009,6 +1019,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
           <LinkPatternsEditor label={i18nT('pages.settings.chatPanel.link_patterns')} hint={i18nT('pages.settings.chatPanel.link_patterns_desc', { placeholder: '{match}' })} configKey="dashboard.link_patterns" rules={dashCfg.link_patterns ?? []} onSave={next => dashMut.mutateAsync({ link_patterns: next })} disabled={dashDisabled} draft={linkPatternsDraft} />
           <SettingsSelect label={i18nT('pages.settings.chatPanel.widget_density')} hint={i18nT('pages.settings.chatPanel.how_aggressively_the_agent_uses_inline_widgets_f')} value={dashCfg.widget_density ?? 'more'} options={['more', 'less']} optionLabels={[i18nT('pages.settings.chatPanel.more_encourage_widgets'), i18nT('pages.settings.chatPanel.less_only_when_needed')]} onChange={v => setDash({ widget_density: v as 'more' | 'less' })} disabled={dashDisabled} />
           <SettingsSelect label={i18nT('pages.settings.chatPanel.response_verbosity')} hint={i18nT('pages.settings.chatPanel.response_verbosity_hint')} value={asVerbosity(dashCfg.verbosity)} options={VERBOSITY_OPTIONS} optionLabels={[i18nT('pages.settings.chatPanel.default_normal_length'), i18nT('pages.settings.chatPanel.concise_trim_filler'), i18nT('pages.settings.chatPanel.answer_only_details_on_request')]} onChange={v => setDash({ verbosity: v as VerbosityLevel })} disabled={dashDisabled} />
+          <SettingsSelect label={i18nT('pages.settings.chatPanel.preferred_language')} hint={i18nT('pages.settings.chatPanel.preferred_language_hint')} value={asPreferredLanguage(dashCfg.preferred_language)} options={PREFERRED_LANGUAGE_OPTIONS} optionLabels={preferredLanguageLabels()} onChange={v => setDash({ preferred_language: v })} disabled={dashDisabled} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.show_context_percentage')} hint={i18nT('pages.settings.chatPanel.display_usage_percentage_next_to_the_context_pro')} checked={chatCfg.showContextPct} onChange={v => setChat('showContextPct', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.show_token_usage')} hint={i18nT('pages.settings.chatPanel.display_used_and_total_tokens_next_to_the_contex')} checked={chatCfg.showContextTokens} onChange={v => setChat('showContextTokens', v)} />
         </SettingsCard>
@@ -1026,6 +1037,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
 
         case 'discovery':
           return (
+        <>
         <SettingsCard>
           <SettingsToggle label={i18nT('pages.settings.chatPanel.feature_tips')} description={tipsConfigOff ? i18nT('pages.settings.chatPanel.disabled_by_instance_config_tips_enabled_false') : undefined} hint={i18nT('pages.settings.chatPanel.show_occasional_feature_discovery_tips_above_the')} checked={!!tipsQ.data && tipsQ.data.enabled_config && !shownOptedOut} onChange={v => tipsMut.mutate(v)} disabled={tipsConfigOff || tipsQ.isLoading || tipsQ.isError} />
           {/* A failed status read used to only grey the toggle out, which is
@@ -1090,6 +1102,8 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
             }
           />
         </SettingsCard>
+        <FeatureTipsList />
+        </>
           )
 
         case 'sessions':
@@ -1103,6 +1117,7 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
           <SettingsToggle label={i18nT('pages.settings.chatPanel.compact_empty_folders')} hint={i18nT('pages.settings.chatPanel.a_folder_with_no_chats_takes_one_row_instead_of')} checked={chatCfg.hideEmptyFolderBody} onChange={v => setChat('hideEmptyFolderBody', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.folder_count_includes_subfolders')} hint={i18nT('pages.settings.chatPanel.folder_count_includes_subfolders_description')} checked={chatCfg.countSubfolderContents} onChange={v => setChat('countSubfolderContents', v)} />
           <SettingsToggle label={i18nT('pages.settings.chatPanel.full_titles_on_scroll')} hint={i18nT('pages.settings.chatPanel.full_titles_on_scroll_description')} checked={chatCfg.fullTitlesOnScroll} onChange={v => setChat('fullTitlesOnScroll', v)} />
+          <SettingsToggle label={i18nT('pages.settings.chatPanel.needs_me_hover_card')} hint={i18nT('pages.settings.chatPanel.needs_me_hover_card_hint')} checked={chatCfg.needsMeHoverCard} onChange={v => setChat('needsMeHoverCard', v)} />
           <SettingsSelect
             label={i18nT('settings.chat.defaultMemoryMode.label')}
             description={i18nT('settings.chat.defaultMemoryMode.description_summary')}
@@ -1114,6 +1129,9 @@ export function ChatPanel({ basePath }: { basePath?: string } = {}) {
             disabled={dashDisabled || defaultModeMut.isPending}
             configKey="dashboard.default_memory_mode"
           />
+          {crewModePreview && (
+            <SettingsToggle label={i18nT('pages.settings.chatPanel.new_chat_crew_mode')} description={i18nT('pages.settings.chatPanel.new_chat_crew_mode_description')} hint={i18nT('pages.settings.chatPanel.new_chat_crew_mode_hint')} configKey="dashboard.new_chat_crew_mode" checked={dashCfg.new_chat_crew_mode ?? false} onChange={v => setDash({ new_chat_crew_mode: v })} disabled={dashDisabled} />
+          )}
           <SettingsInput
             label={i18nT('pages.settings.chatPanel.session_folder_root')}
             description={i18nT('pages.settings.chatPanel.session_folder_root_desc')}

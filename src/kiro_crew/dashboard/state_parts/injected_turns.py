@@ -60,6 +60,19 @@ SUBAGENT_SYNTHESIS_PROMPT = (
 )
 
 
+# Appended to the announce of a completion that arms the synthesis. The arm
+# reads only in-memory state, so a sibling queued in the task store can still
+# be out: the note is conditional and promises nothing about what follows. A
+# turn that takes it and ends on visible reply text lets the fire gate drop the
+# synthesis (`_drop_single_turn_synthesis`), but only once the gate's store
+# read answers clear.
+SUBAGENT_FINAL_COMPLETION_NOTE = (
+    "[SYSTEM] This may be the last sub-agent result of this batch. If no other "
+    "sub-agent of this batch is still queued or running, give the consolidated "
+    "report across all of its results in this reply."
+)
+
+
 # Synthetic continuation injected after a recoverable tool refusal (host-gate
 # policy deny or the read-only bash gate) ended a turn early. Carries the
 # refusal reason back to the model so it can adapt instead of stalling for the
@@ -495,6 +508,7 @@ def build_tool_stall_recovery_prompt(
     idle_secs: int,
     command: str = "",
     stuck_input: bool = False,
+    processes_terminated: int = 0,
 ) -> str:
     """Body of the continuation injected after a watchdog tool-stall cancel.
 
@@ -513,6 +527,16 @@ def build_tool_stall_recovery_prompt(
         f"~{idle_mins} minute(s) and the turn was ended by a Kiro Crew watchdog. "
         "This was NOT a user action — do not treat it as a cancellation or "
         "interruption by the user.",
+    ]
+    if processes_terminated > 0:
+        noun = "process" if processes_terminated == 1 else "processes"
+        lines += [
+            "",
+            f"The watchdog terminated {processes_terminated} {noun} from the "
+            "stalled shell command. Those old processes are no longer running; "
+            "still check for any related survivor before retrying.",
+        ]
+    lines += [
         "",
         "Before doing anything else, check whether the tool actually completed "
         "or left partial results — do NOT blindly re-run the whole task or "

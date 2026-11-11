@@ -1,9 +1,10 @@
 """The ``lessons.changed`` signal: a lesson in the global store was added, updated or removed.
 
-Lessons change on three paths: ``POST /api/lessons`` (the ``learn_add`` tool, the
-Memory tab, the CLI), ``DELETE /api/lessons``, and history consolidation, which runs
-on a worker thread. Each path calls :func:`emit_lessons_changed` once the store has
-actually changed, and the gateway registers the one observer that turns it into a
+Lessons change on four paths: ``POST /api/lessons`` (the ``learn_add`` tool, the
+Memory tab, the CLI), ``PATCH /api/lessons`` (the ``learn_update`` tool),
+``DELETE /api/lessons``, and history consolidation, which runs on a worker thread.
+Each path calls :func:`emit_lessons_changed` once the store has actually changed,
+and the gateway registers the one observer that turns it into a
 ``lessons.changed`` WebSocket frame. An app receives that frame only when its
 manifest declares the ``lessons`` event scope (``dashboard/ws_event_scope.py``).
 
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 #: WebSocket frame type, classified under the ``lessons`` declaration.
 LESSONS_CHANGED_EVENT = "lessons.changed"
 
-#: What happened to the store. ``updated`` is an existing row that gained a clause.
+#: What happened to the store. ``updated`` is an existing row that gained a clause,
+#: changed tier or had its rule rewritten.
 LESSON_ADDED = "added"
 LESSON_UPDATED = "updated"
 LESSON_REMOVED = "removed"
@@ -84,13 +86,14 @@ def emit_lessons_changed(action: str, source: str, count: int = 1) -> None:
 def lesson_write_action(outcome: str, superseded: bool) -> str | None:
     """The change a lesson write made, from its outcome word, or ``None`` for none.
 
-    ``inserted`` adds a row and ``enriched`` attaches a clause to one. A declining
-    outcome (``unchanged``, ``deduped``, ``refused``) can still have deleted rows it
+    ``inserted`` adds a row, ``enriched`` attaches a clause to one and ``replaced``
+    (the Memory tab's edit) rewrites one's rule. A declining outcome
+    (``unchanged``, ``deduped``, ``refused``) can still have deleted rows it
     superseded, which is a removal; otherwise it changed nothing.
     """
     if outcome == "inserted":
         return LESSON_ADDED
-    if outcome == "enriched":
+    if outcome in ("enriched", "replaced"):
         return LESSON_UPDATED
     if superseded:
         return LESSON_REMOVED

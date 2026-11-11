@@ -115,6 +115,17 @@ def permissions_block_readable(raw: Any) -> bool:
     return parsed is not None
 
 
+def allow_exclude_limit() -> int:
+    """The most ``exclude`` patterns an ``allow`` rule may list and still reach KAS.
+
+    KAS ANDs an exclude list onto every statement it compiles, so a longer one is
+    not split the way a long ``match`` is: the projection leaves that allow out.
+    """
+    from kiro_crew.acp.kas_permissions import _MAX_PATTERNS_PER_RULE
+
+    return _MAX_PATTERNS_PER_RULE
+
+
 def allow_granted_by_spec(rule: dict[str, Any], spec: dict[str, Any]) -> bool:
     """Whether *spec*'s own grants already cover allow *rule* on KAS.
 
@@ -184,9 +195,44 @@ def tools_settings_unenforced(raw: Any) -> list[str]:
     cannot turn into a rule (a regex with no glob form, a URL pattern naming a
     path) and an ``allowedCommands`` entry Crew's gate cannot answer are named,
     and so is a duplicate alias key kiro-cli drops (``canonical_tools_settings``).
+    So is an ``allowedCommands`` entry Crew reads by ASCII (``\\d``, ``\\w``,
+    ``\\s``, ``\\b`` or ``(?i)``, ``Pattern.ascii_only``): kiro-cli reads those by
+    Unicode, so it is not carried exactly.
+    Each entry is named under the spelling *raw* wrote (``aliases.as_authored``).
     """
     from kiro_crew.acp import kas_permissions
+    from kiro_crew.platform import allowed_commands
+    from kiro_crew.platform import tools_settings_aliases as aliases
 
     settings, dropped = kas_permissions.canonical_tools_settings(raw)
     _block, not_carried = kas_permissions.tools_settings_to_permissions(settings)
-    return sorted(set(not_carried) | set(dropped))
+    inexact = [
+        f"{key}.allowedCommands"
+        for key, entry in (settings.items() if isinstance(settings, dict) else ())
+        if key in ("execute_bash", "shell")
+        and isinstance(entry, dict)
+        and isinstance(entry.get("allowedCommands"), list)
+        and any(
+            (parsed := allowed_commands.parse(p)) is not None and parsed.ascii_only
+            for p in entry["allowedCommands"]
+        )
+    ]
+    return sorted(
+        {aliases.as_authored(raw, path) for path in (*not_carried, *inexact)} | set(dropped)
+    )
+
+
+def unreadable_allowed_commands(raw: Any) -> list[tuple[str, str, str]]:
+    """``(shell key, entry, reason)`` for each ``allowedCommands`` entry in
+    ``toolsSettings`` *raw* that Kiro Crew's gate cannot read
+    (``kas_unread_commands.unreadable_allowed_commands``), read with one key per
+    kiro-cli alias group as the gate reads it, and each key named under the
+    spelling *raw* wrote (``aliases.as_authored``). For ``kirocrew doctor``."""
+    from kiro_crew.acp import kas_permissions, kas_unread_commands
+    from kiro_crew.platform import tools_settings_aliases as aliases
+
+    settings, _dropped = kas_permissions.canonical_tools_settings(raw)
+    return [
+        (aliases.as_authored(raw, key), entry, reason)
+        for key, entry, reason in kas_unread_commands.unreadable_allowed_commands(settings)
+    ]

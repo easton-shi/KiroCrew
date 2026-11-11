@@ -43,6 +43,7 @@ from kiro_crew.config import data_home
 from kiro_crew.config.loader import (  # noqa: F401
     STT_PROVIDER_LOCAL,
     KiroCrewConfig,
+    PendingEditBlocksSave,
     consume_managed_service_launch_environment,
     degraded_config_files,
     load_loop_stall_exit_after,
@@ -70,6 +71,7 @@ from kiro_crew.dashboard.agent_ipc import (  # noqa: F401
     start_agent_site,
 )
 from kiro_crew.dashboard.approval_posture import trust_reaches_subagents  # noqa: F401
+from kiro_crew.dashboard.chat_runner import install_acquire_identity_check
 from kiro_crew.dashboard.chat_utils import (  # noqa: F401
     effective_session_key,
     wire_session_subagent_probe,
@@ -156,6 +158,10 @@ from kiro_crew.dashboard.listener_guard import (  # noqa: F401
     release_site,
 )
 from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog  # noqa: F401
+from kiro_crew.dashboard.loop_watchdog import (  # noqa: F401
+    PAGING_GRACE_MAX_SECS_MACOS,
+    read_loop_pageins_under_pressure,
+)
 from kiro_crew.dashboard.origin import (  # noqa: F401
     AUDIT_CLAIMED_KEY,
     PROBE_PATHS,
@@ -273,6 +279,7 @@ from kiro_crew.dashboard.server_runtime.heartbeat import (  # noqa: F401
 )
 from kiro_crew.dashboard.server_runtime.inherited_trust import (  # noqa: F401
     _clear_override_derived_trust,
+    _drop_policy_denied_trust,
     _suspend_override_derived_trust,
 )
 from kiro_crew.dashboard.server_runtime.instances_lifecycle import (  # noqa: F401
@@ -335,7 +342,7 @@ from kiro_crew.dashboard.server_runtime.mcp_routes import (  # noqa: F401
 )
 from kiro_crew.dashboard.server_runtime.middleware_chain import (  # noqa: F401
     _dashboard_canonical_redirect,
-    _insert_enterprise_gate,
+    _insert_lts_gate,
     _install_api_middlewares,
     _install_dashboard_middlewares,
     _resolve_tailnet_trust,
@@ -850,12 +857,12 @@ async def start_dashboard(
     # ``setup_tunnel`` assigns it further below, and this is still well before
     # ``runner.setup()`` freezes the signal lists. See ``_wire_tunnel_shutdown``.
     _wire_tunnel_shutdown(app, state)
-    # Enterprise build only: no kiro sign-in, no Crew. Checked here, still before
-    # the bind, on the one enterprise sign-in (Crew's vault sign-in) that
+    # LTS build only: no kiro sign-in, no Crew. Checked here, still before
+    # the bind, on the one LTS sign-in (Crew's vault sign-in) that
     # the rules fetch read. A plain store read, so a repeat costs nothing. A
     # failure exits non-zero.
-    from kiro_crew.enterprise_boot import require_kiro_login
     from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+    from kiro_crew.lts_boot import require_kiro_login
 
     await require_kiro_login(assume_ready=assume_kiro_ready)
     if kiro_prerequisite_service is None:
@@ -865,14 +872,14 @@ async def start_dashboard(
         )
     app["kiro_prerequisite_service"] = kiro_prerequisite_service
     state.kiro_prerequisite_service = app["kiro_prerequisite_service"]
-    # Enterprise build only: the gate starts open on that sign-in and closes if
+    # LTS build only: the gate starts open on that sign-in and closes if
     # it is lost. The middleware chain installed below reads it.
-    from kiro_crew.dashboard.enterprise_gate_middleware import (
-        enterprise_login_source,
-        install_enterprise_gate,
+    from kiro_crew.dashboard.lts_gate_middleware import (
+        install_lts_gate,
+        lts_login_source,
     )
 
-    install_enterprise_gate(app, await enterprise_login_source())
+    install_lts_gate(app, await lts_login_source())
     # A signed-out bundled kiro-cli-chat fails a prompt as a bare connection
     # error; the ACP layer asks this service's whoami verdict to tell it apart.
     from kiro_crew.kiro_prerequisite import register_turn_auth_service
@@ -893,6 +900,10 @@ async def start_dashboard(
     # retired before reuse (see flag_identity_stamp_mismatches). Unwired (the
     # CLI, tests), spawns stay unstamped and keep the pre-stamping behavior.
     state.sessions.spawn_identity_reader = app["kiro_prerequisite_service"].read_spawn_identity
+    # Every session acquire then runs the account check first, unattended, so a
+    # task step, a channel turn or a cron run cannot reuse a session left on a
+    # previous Kiro account. The dashboard chat turn runs its own check.
+    install_acquire_identity_check(state)
     # Probe Kiro readiness during boot rather than on the dashboard's first
     # status request: the cold probe spawns sandboxed CLI subprocesses and can
     # take seconds, which is what made the first-run setup chrome visible to
@@ -1022,6 +1033,12 @@ async def start_dashboard(
     runner: web.AppRunner | None = None
     try:
         _bind_ip = _export_reserved_bind_evidence(_dashboard_sock)
+        # The port this gateway serves on. Under --port auto the requested port is
+        # 0, which names no listener. app["port"] keeps the requested port because
+        # it is the auth-cookie name fallback (mc_token_<port> when the Host header
+        # has no port), and changing it would stop reading cookies set under it.
+        _served_port = port or _dashboard_sock.getsockname()[1]
+        app["served_port"] = _served_port
 
         await _start_app_backends(app, state)
 
@@ -1121,16 +1138,25 @@ async def start_dashboard(
         # re-bind a rotated access token to the same verified peer identity).
         app["tailnet_trust"] = _tailnet_trust
         # The relay client's door into this app (dashboard/kiro_relay). Built off
-        # unless tunnel.relay_enabled is set, and always off in an enterprise build,
+        # unless tunnel.relay_enabled is set, and always off in an LTS build,
         # which ignores that local switch with the rest of the tunnel control. Either
         # way the ingress middleware hands every request that is not a verified
         # handover on to the client-sent relay-header strip.
         from kiro_crew.edition_locks import relay_selected
 
-        app[RELAY_INGRESS_APP_KEY] = RelayIngress(enabled=relay_selected(_cfg))
+        app[RELAY_INGRESS_APP_KEY] = RelayIngress(
+            enabled=relay_selected(_cfg),
+            handle_email_domains=_cfg.tunnel.relay_handle_email_domains,
+        )
         app["allowed_origins"] = build_allowed_origins(
             port, local_only, configured_host, tailnet_host=_tailnet_host
         )
+        if _served_port != port:
+            # Added to the requested port's set, never in place of it, so nothing
+            # the set admitted before is dropped.
+            app["allowed_origins"] |= build_allowed_origins(
+                _served_port, local_only, configured_host, tailnet_host=_tailnet_host
+            )
         # Exposed to handlers (e.g. knowledge.pick_folder) that only make sense when
         # the browser and gateway are co-located on localhost.
         app["local_only"] = local_only
@@ -1234,7 +1260,7 @@ async def start_dashboard(
         # cleanup, before the instance tunnels and the crew-log drain it uses.
         # Imports nothing here; the puller is started after bind, below.
         app.on_cleanup.append(_stop_remote_puller)
-        _register_instances_hooks(app, state, port)
+        _register_instances_hooks(app, state, _dashboard_sock.getsockname()[1])
         _register_browser_harness_lifecycle(app, state)
         _register_connections_warm_lifecycle(app, state)
         _register_workflow_lifecycle(app, state)
@@ -1548,6 +1574,11 @@ async def start_dashboard(
     # The pre-publication half: suspend inherited slot trust while a new ceiling is
     # being resolved, and get it back if the ceiling still permits.
     safety_override().on_policy_suspend = functools.partial(_suspend_override_derived_trust, state)
+    # A ``permission_mode`` deny of ``trust`` / ``trust_reads`` drops the slot grants it
+    # forbids at the install that resolves it, the same moment a ``yolo`` deny revokes.
+    from kiro_crew.approval_mode_policy import register_deny_hook
+
+    register_deny_hook("dashboard", functools.partial(_drop_policy_denied_trust, state))
 
     await _notify_restart_dropped_grant(state)
 
@@ -1564,6 +1595,13 @@ async def start_dashboard(
         await asyncio.to_thread(migrate_existing_crewmates, cfg)
     except Exception:
         logger.warning("bot-owned-config migration failed", exc_info=True)
+    # A folder Default agent saved as a crewmate's label is pointed at that
+    # crewmate's key: once per data home, after the socket is up; never raises.
+    # Imported here, like the Crew Mode start pass below, so the server's own
+    # namespace, which its composition contract test freezes, gains no name.
+    from kiro_crew.dashboard.chat_folders_records import migrate_folder_member_labels
+
+    await migrate_folder_member_labels(state, cfg)
 
     await _restore_dashboard_sessions(state, cfg)
 
@@ -1646,6 +1684,10 @@ async def start_dashboard(
     # Tells the NEXT boot that this instance got the whole startup battery
     # away, so a stall from here on does not implicate the battery.
     _dispatch_healthy_boot_marker(state)
+    # Chats a planned in-app restart cut off resume once the loop is serving.
+    from kiro_crew.dashboard.restart_resume import schedule_resume_after_restart
+
+    schedule_resume_after_restart(state)
 
     return runner, state
 

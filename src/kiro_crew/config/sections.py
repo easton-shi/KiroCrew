@@ -258,6 +258,9 @@ from kiro_crew.config.sections_dashboard import (  # noqa: F401
     LOOP_STALL_EXIT_AFTER_MANAGED_DEFAULT,
     LOOP_STALL_EXIT_AFTER_MAX,
     LOOP_STALL_EXIT_AFTER_MIN,
+    PREFERRED_LANGUAGES,
+    REMOTE_EDITOR_HOST_PATTERN,
+    REMOTE_EDITOR_IDS,
     VERBOSITY_LEVELS,
     DashboardConfig,
     JiraAuthEntry,
@@ -349,6 +352,7 @@ from kiro_crew.config.sections_limits import (  # noqa: F401
     POOL_SIZE_MAX,
     POOL_TTL_SECS_MAX,
     POOL_TTL_SECS_MIN,
+    PRIVACY_ACK_VERSION_MAX,
     RECENT_TINT_COUNT_MAX,
     RECENT_TINT_COUNT_MIN,
     RECONCILE_MAX_KILLS_MAX,
@@ -420,6 +424,8 @@ from kiro_crew.config.sections_slack import (  # noqa: F401
     ACTIVATION_OBSERVE,
     ACTIVATION_OFF,
     ACTIVATION_REVIEW,
+    CODE_CHANNEL_APPROVAL_ASK,
+    CODE_CHANNEL_APPROVAL_MODES,
     CODE_CHANNEL_DEFAULT_MAX,
     ChannelConfig,
     CodeChannelDefaultsConfig,
@@ -500,6 +506,7 @@ from kiro_crew.constants import (
 from kiro_crew.constants import SUBAGENT_TIMEOUT_MAX as _SUBAGENT_TIMEOUT_MAX
 from kiro_crew.constants import SUBAGENT_TIMEOUT_MIN as _SUBAGENT_TIMEOUT_MIN
 from kiro_crew.constants import SUBAGENT_TIMEOUT_SECS as _SUBAGENT_TIMEOUT_SECS
+from kiro_crew.crewmate_worktree import BRANCH_PREFIX as _BRANCH_PREFIX
 from kiro_crew.effort import EFFORT_LEVELS, is_valid_effort
 from kiro_crew.mcp_gateway.secret_uri import SECRET_URI_PREFIX
 from kiro_crew.stt.limits import DEFAULT_IDLE_EVICT_SECS as _STT_DEFAULT_IDLE_EVICT_SECS

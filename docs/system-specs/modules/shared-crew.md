@@ -117,7 +117,7 @@ Evidence, strongest first (`identity.derive_principal`):
 
 | Request | Principal | Provenance |
 |---|---|---|
-| A request the Crew's relay client handed over and the relay ingress verified (`kiro_relay.caller.published_relay_caller`), checked first in `identity._derive_actor` and never followed by a `whois` | a teammate: `human` under provider `kiro`, issuer `kiro-relay`, keyed by the exact Kiro user ID (no case folding), labelled with the relay's name, else its email, else `Kiro user ...` and the ID's last 6 characters; the relayed owner of a personal Crew: the local operator's own principal id for the admitted owner subject, so the machine tab and the relay tab are one person | `kiro_relay` |
+| A request the Crew's relay client handed over and the relay ingress verified (`kiro_relay.caller.published_relay_caller`), checked first in `identity._derive_actor` and never followed by a `whois` | a teammate: `human` under provider `kiro`, issuer `kiro-relay`, keyed by the exact Kiro user ID (no case folding), labelled with the relay's name, else its email (only the part before the `@` when the whole domain is listed in `tunnel.relay_handle_email_domains`), else `Kiro user ...` and the ID's last 6 characters; the relayed owner of a personal Crew: the local operator's own principal id for the admitted owner subject, so the machine tab and the relay tab are one person | `kiro_relay` |
 | An app identity (an app token, or an internal caller the middleware derived an app for) | `system`, component `app:<name>` | `internal` |
 | The internal loopback secret (kiro-cli, MCP, doctor) | `system`, component `internal` | `internal` |
 | Loopback peer forwarded by local `tailscale serve`, resolved and allowlisted by `tailnet.resolve_forwarded_peer` | `human` keyed by tailnet login; `machine` keyed by node for a tagged node | `tailscale_serve` |
@@ -129,7 +129,11 @@ Evidence, strongest first (`identity.derive_principal`):
 
 A relayed principal's email and name are display only. Its display `login` is always
 empty: an author stamp read back from a transcript loses its provenance, so a login there
-could reach an audit record. The email is only the label when the relay sent no name, and
+could reach an audit record. The email is only the label when the relay sent no name.
+`tunnel.relay_handle_email_domains` (empty by default, read at gateway start into the
+`RelayIngress`) lists domains whose addresses are labelled by their handle: the domain
+after the last `@` must equal a listed one ignoring case, so `a@sub.example.com` and
+`a@example.com.example.io` keep the full address when only `example.com` is listed.
 `audit.audit_principal` blanks the login of any `kiro_relay` principal as a backstop.
 People records the relayed owner under the local operator's provenance
 (`identity._people_principal`), so the owner's one entry never flips with whichever tab
@@ -347,7 +351,8 @@ sighting and a device count (a digest per node, at most `MAX_DEVICES`). Unknown
 and system principals are not recorded. `people.people_view` builds the People
 body: it merges that record with the creators recorded on persisted sessions
 and with the people the local Tailscale daemon lists, in that order, so a person
-keeps the first row they have. Each row names its `sources`
+keeps the first row they have. The route builds that body in a worker thread
+(see *Session list query*). Each row names its `sources`
 (`observed`, `session_creator`, `tailscale_share`), so an observation is never
 presented as membership, and carries `is_owner` (the row's principal is one of
 `owner.owner_principal_ids`). An owner viewing always has a row, and the owner's
@@ -615,6 +620,18 @@ the phone dialog show its plain URL in `capabilities.tailnet_direct.urls` order
 (`tailnet_direct.direct_urls`): the IPv4 tailnet address first, which needs no
 MagicDNS, then `http://<magicdns-name>:<port>/`, then the IPv6 address, with a copy
 button (`TailnetDirectLink`). The URL carries no token.
+
+Invite message. Tailscale writes the invitation email and its invite API takes only
+`{email?, multiUse, allowExitNode}`, so the Crew address cannot ride in it. After an email
+invite the dialog says so in one line and offers the copyable message, which carries the
+direct listener's links (`CopyInviteMessage`, the same `capabilities.tailnet_direct.urls`
+source as the share link; never the `tailscale serve` address, which needs a token, and
+never a token). With the listener `off` there is no link to send: the line names the
+**Direct tailnet link** setting in Advanced instead, and no button renders. `unavailable`
+means the setting is already on and the listener could not start, so the line says there is
+no direct link right now and does not ask for the setting. A gateway that reports no
+`tailnet_direct` at all shows neither.
+
 The phone dialog keeps its token-carrying QR and sign-in link under an Advanced fold
 for devices without Tailscale. People adds the device-owner caveat under the list,
 and the macOS empty state (`platform_unprovable`) points at the direct link.
@@ -806,12 +823,14 @@ transcripts are dropped, then the search (`q`, case-insensitive over title and
 key) and the creator filter, then the page is cut. Order is newest `modified`
 first with a key digest as the tiebreak. The cursor is a keyset position, so one
 walk never returns a row twice; a session modified during a walk moves to the top
-and appears on the next walk. `total_matching` counts every session passing the
-search and the filter. `hidden_by_filter` counts the sessions passing the search
-that the creator filter excluded. The list covers persisted sessions; a slot
-that has never been saved is not in it. The route answers only the dashboard
-user, and refuses an app token or an internal caller with 403, so it reaches no
-session the existing list does not.
+and appears on the next walk. It runs in a worker thread, as do the People body
+and the mode route's creator scan: each parses every row's attribution, which on
+the event loop would stall the gateway on a large catalog. `total_matching`
+counts every session passing the search and the filter. `hidden_by_filter`
+counts the sessions passing the search that the creator filter excluded. The
+list covers persisted sessions; a slot that has never been saved is not in it.
+The route answers only the dashboard user, and refuses an app token or an
+internal caller with 403, so it reaches no session the existing list does not.
 
 The `unattributed` filter (the older `unknown` value is accepted and echoed as
 `unattributed`) lists sessions with no human creator and no named trigger; a
@@ -1755,10 +1774,13 @@ person is a current member.
 
 ✎ opens a name-and-picture dialog. Any admitted person may change any person's
 display name and picture, their own included (`routes_people`): equal rights
-among the callers the People read admits. Those are a person the direct listener
-admitted after checking the access set (`routes_identity._tailnet_person`), and
-the owner. A non-owner dashboard link session (a Telegram, Teams or Webex
-allowlist link) goes through `require_owner_for_dashboard_caller` and is refused,
+among the people a sharing path admitted by its own check
+(`routes_identity._tailnet_person`: the direct listener after checking the access
+set, or the SSM listener on a live invite), and the owner. The People,
+sessions and mode reads also admit a team Crew teammate the Kiro relay verified
+(`routes_identity._relay_teammate`), as does a narrowed Bots roster read
+(`GET /api/members`, see member-event-log); the name-and-picture edit does not. A
+non-owner dashboard link session (a Telegram, Teams or Webex allowlist link) goes through `require_owner_for_dashboard_caller` and is refused,
 as it is for the read. The record is keyed by stable Tailscale user id in the invite store's
 `display` map, so it follows a renamed login and works for a person who was never
 invited (the user id comes from the daemon's whois, `tailnet_live_allowlist`).

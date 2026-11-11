@@ -15,9 +15,10 @@ import SegmentedControl from '../../components/SegmentedControl'
 import ReportProblemCard from './ReportProblemCard'
 import { ARM_POLL_FAILURE_THRESHOLD, AGENT_REQUEST_POLL_MS, AgentUpdateRequestCard, copyCommand } from './AboutPanelUpdateFlow'
 import { AboutPanelGatewayUpdates, AboutPanelUpdateConfirm, useAboutPanelGatewayUpdate } from './AboutPanelGatewayUpdate'
+import { DesktopGatewayRestartRow, useDesktopGatewayRestart } from './DesktopGatewayRestartRow'
 import { api } from '../../api/client'
 import { gatewayAutoUpdateCopy, useGatewayAutoUpdateEffect, useIsPolicyGoverned, useUpdateSwitchesShown } from '../../utils/updateSwitches'
-import { useGatewayAutoUpdate, type SwitchState } from '../../hooks/useGatewayAutoUpdate'
+import { autoUpdatePinNote, useGatewayAutoUpdate, type SwitchState } from '../../hooks/useGatewayAutoUpdate'
 import { useAppAutoDownload } from '../../hooks/useAppAutoDownload'
 import { storeAnsweredUpdateInfo, updateInfoQuery } from '../../api/updateInfoQuery'
 import { fmtSpeed } from '../../api/helpers'
@@ -32,7 +33,7 @@ import { feedbackTracker } from '../../feedbackTracker'
 import type { UpdateState } from '../../hooks/useUpdateSubscription'
 import { gatewayStopCommand } from '../../hooks/useUpdateSubscription'
 import { useInstallDispatch } from '../../hooks/useInstallDispatch'
-import { foldStableStamp, sameBuildVersion } from '../../utils/displayVersion'
+import { editionBuildVersion, foldStableStamp, sameBuildVersion } from '../../utils/displayVersion'
 import { bytesAreTheStableRelease as followedLanePublishesRunningBytes } from '../../utils/laneMembership'
 
 /** Transfer rate for the progress label, in the active locale (`fmtSpeed`). */
@@ -146,12 +147,12 @@ const reportIssueUrl = (): string => feedbackTracker().issueUrl
  * broken — the user most likely to have something worth reporting.
  *
  * Mirrors auto-update.js channelForVersion's rule as far as it needs to: a bare
- * semver is stable, ANY prerelease suffix (-insider.N, -nightly.<stamp>, -rc.N)
- * is not. It deliberately does not try to name WHICH lane, because the copy no
- * longer interpolates the channel.
+ * semver and an edition's `-N` build (`editionBuildVersion`) are stable, ANY
+ * other prerelease suffix (-insider.N, -nightly.<stamp>, -rc.N) is not. It
+ * deliberately does not name WHICH lane: the copy no longer interpolates it.
  */
 function versionLooksPrerelease(version: string | undefined): boolean {
-  return !!version && version.includes('-')
+  return !!version && version.includes('-') && editionBuildVersion(version) === null
 }
 
 /** Row: label on the left, value on the right. */
@@ -238,10 +239,11 @@ export function AppAutoDownloadSwitch({ unreadable, anchor = true, onHandoff }: 
  * row in every state: what changes with the gateway's `update_auto_effect` is
  * whether the switch can be flipped and the note under it
  * (`gatewayAutoUpdateCopy`), so a verdict that arrives while the row is on
- * screen never swaps it for another element. Held at the schema default, on,
+ * screen never swaps it for another element. Where the effect holds it, it
+ * reads off, since nothing installs there. Held at the schema default, on,
  * until the saved value has been read. Where config.local.json sets the key,
- * a note says so (the Privacy tab's pin note); the switch stays usable, since
- * a click is how a removed override is noticed.
+ * the switch is held and its note says why (`autoUpdatePinNote`): the policy
+ * that keeps it there when an edition owns the entry, else how to remove it.
  */
 export function GatewayAutoUpdateSwitch({ anchor = true, readOnMount = false, onHandoff, contextNote, sectionHeading }: {
   /** `false` for a copy outside Settings, so deep links land on About's row. */
@@ -257,7 +259,10 @@ export function GatewayAutoUpdateSwitch({ anchor = true, readOnMount = false, on
   contextNote?: string
 
 }) {
-  const canApply = useAppSelector(s => s.dashboard.status?.update_can_apply) === true
+  // `update_can_apply` answers for `POST /api/update` alone; a managed venv whose
+  // policy turns unattended installs off still installs through its own Update.
+  const canApply = useAppSelector(s =>
+    s.dashboard.status?.update_can_apply === true || s.dashboard.status?.update_auto_manual_only === true)
   const copy = gatewayAutoUpdateCopy(useGatewayAutoUpdateEffect(), { canApply })
   const gw = useGatewayAutoUpdate({ readOnMount })
   const reduceMotion = useReducedMotion()
@@ -277,7 +282,9 @@ export function GatewayAutoUpdateSwitch({ anchor = true, readOnMount = false, on
       <SettingsToggle
         label={i18nT('pages.settings.aboutPanel.automatic_updates')}
         description={i18nT('pages.settings.aboutPanel.gateway_auto_update_description')}
-        checked={gw.checked}
+        // A switch held by the effect cannot install whatever is saved, so it
+        // reads off; the saved value comes back if the effect turns to install.
+        checked={gw.checked && !copy.disabled}
         disabled={copy.disabled || gw.held || gw.overlayPinned}
         onChange={gw.set}
         configKey="auto_update"
@@ -301,7 +308,7 @@ export function GatewayAutoUpdateSwitch({ anchor = true, readOnMount = false, on
       </AnimatePresence>
       {showPinNote && (
         <p id={pinNoteId} className="text-[12px] text-muted mt-1" data-testid="auto-update-pin-note">
-          {i18nT('pages.settings.privacyPanel.recordMetricsOverlayPinned')}
+          {autoUpdatePinNote(gw.overlayPolicy)}
         </p>
       )}
       <SwitchNotices state={gw} testIdPrefix="auto-update" onHandoff={onHandoff}
@@ -338,6 +345,7 @@ export function AboutPanel() {
   const queryClient = useQueryClient()
   const desktopApi = getUpdateApi()
   const isDesktop = !!desktopApi
+  const desktopRestart = useDesktopGatewayRestart()
 
   // Desktop (Electron) app info (version, channel, platform)
   const infoQuery = useQuery({ ...updateInfoQuery, enabled: isDesktop })
@@ -422,6 +430,17 @@ export function AboutPanel() {
   // Query-cache listeners run for every updater payload, before React Query
   // batches observer renders. The refs preserve the event order for one armed
   // click even when `downloading` and its cancellation share a render.
+  //
+  // Read in that order, a payload also says when a click's request ended
+  // before any download started. For a click made with nothing found, the
+  // main process checks first: `not-available` and a failed check end the
+  // request there, and so does `found` on the feed lane with auto-download
+  // off, where it waits for a Download click. The managed lane follows its
+  // `found` with `downloaded` at once, and with auto-download on the download
+  // starts; the feed lane says which on the `found` itself, and a shell too old
+  // to say leaves the cached preference to answer. Left armed, the click keeps both request actions disabled and
+  // installs whatever a later download brings, with nobody clicking. The
+  // rendered state cannot say this: a click is also made FROM each of them.
   useEffect(() => queryClient.getQueryCache().subscribe(event => {
     if (event.type !== 'updated'
       || event.query.queryKey.length !== 1
@@ -431,13 +450,19 @@ export function AboutPanel() {
     if (pushed?.state === 'downloading') {
       agentArmSawDownloadRef.current = true
       setAgentArmSawDownload(true)
-    } else if (agentArmSawDownloadRef.current
-      && (pushed?.state === 'not-available' || pushed?.state === 'checking')) {
-      agentInstallArmedRef.current = false
-      agentArmSawDownloadRef.current = false
-      setAgentInstallArmed(false)
-      setAgentArmSawDownload(false)
+      return
     }
+    const info = queryClient.getQueryData<UpdateInfo | null>(updateInfoQuery.queryKey)
+    const ended = agentArmSawDownloadRef.current
+      ? pushed?.state === 'not-available' || pushed?.state === 'checking'
+      : pushed?.state === 'not-available'
+        || (pushed?.state === 'error' && pushed.phase === 'check')
+        || (pushed?.state === 'found' && (pushed.autoDownload ?? info?.autoDownload) === false && !info?.updateCommand)
+    if (!ended) return
+    agentInstallArmedRef.current = false
+    agentArmSawDownloadRef.current = false
+    setAgentInstallArmed(false)
+    setAgentArmSawDownload(false)
   }), [queryClient])
   const agentDownloadLanded = agentInstallArmed && updateState?.state === 'downloaded'
   useEffect(() => {
@@ -492,7 +517,7 @@ export function AboutPanel() {
   const agentRequestPanelError = agentRequest.failureCount >= ARM_POLL_FAILURE_THRESHOLD
     ? i18nT('pages.settings.aboutPanel.arm_status_poll_failing')
     : agentDownloadFailed
-      ? `${i18nT('pages.settings.aboutPanel.download_failed')}: ${updateState?.state === 'error' ? updateErrorText(updateState) : i18nT(UPDATE_ERROR_KEYS.unknown)}`
+      ? i18nT('pages.settings.aboutPanel.download_failed_reason', { reason: updateState?.state === 'error' ? updateErrorText(updateState) : i18nT(UPDATE_ERROR_KEYS.unknown) })
       : ''
   // While a request is live, its card owns the one Install control. Rendering
   // the ordinary card's "Download & Install" beneath it shows two buttons for
@@ -634,6 +659,9 @@ export function AboutPanel() {
   // promoted stable release keeps its candidate's `rc` stamp, that comparison
   // reported "mid-switch" permanently for every promoted-stable install.
   const gwChannelMovePending = useAppSelector(s => s.dashboard.status?.update_channel_move_pending) === true
+  // The read-only channel rows print the channel id; `lts` (the LTS
+  // edition's own lane, RFC D11) gets a translated label like the switcher's.
+  const channelLabel = (c: string | undefined) => (c === 'lts' ? i18nT('pages.settings.aboutPanel.lts') : c)
   // Running prerelease bytes? See `isPrerelease` below — computed after the
   // gateway check state it consults, and rendered from JSX, so the ordering is
   // free.
@@ -652,7 +680,7 @@ export function AboutPanel() {
     status = (
       <ErrorNotice
         variant="inline"
-        message={`${i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates')}: ${updateErrorText(updateState)}`}
+        message={i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates_reason', { reason: updateErrorText(updateState) })}
         askAgent
       />
     )
@@ -662,7 +690,7 @@ export function AboutPanel() {
     status = (
       <ErrorNotice
         variant="inline"
-        message={`${i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates')}: ${i18nT(UPDATE_ERROR_KEYS.unknown)}`}
+        message={i18nT('pages.settings.aboutPanel.couldn_t_check_for_updates_reason', { reason: i18nT(UPDATE_ERROR_KEYS.unknown) })}
         askAgent
         testId="check-request-failed"
       />
@@ -750,7 +778,7 @@ export function AboutPanel() {
       {cardFailed && (
         <ErrorNotice
           variant="inline"
-          message={`${i18nT(cardInstallFailed ? 'pages.settings.aboutPanel.install_failed' : 'pages.settings.aboutPanel.download_failed')}: ${updateErrorText(updateState)}`}
+          message={i18nT(cardInstallFailed ? 'pages.settings.aboutPanel.install_failed_reason' : 'pages.settings.aboutPanel.download_failed_reason', { reason: updateErrorText(updateState) })}
           askAgent
           testId="update-download-error"
         />
@@ -765,7 +793,7 @@ export function AboutPanel() {
       {!cardFailed && downloadMutation.isError && (
         <ErrorNotice
           variant="inline"
-          message={`${i18nT('pages.settings.aboutPanel.download_failed')}: ${i18nT(UPDATE_ERROR_KEYS.unknown)}`}
+          message={i18nT('pages.settings.aboutPanel.download_failed_reason', { reason: i18nT(UPDATE_ERROR_KEYS.unknown) })}
           askAgent
           testId="update-download-request-error"
         />
@@ -773,7 +801,7 @@ export function AboutPanel() {
       {!cardFailed && installMutation.isError && (
         <ErrorNotice
           variant="inline"
-          message={`${i18nT('pages.settings.aboutPanel.install_failed')}: ${i18nT(UPDATE_ERROR_KEYS.installUnknown)}`}
+          message={i18nT('pages.settings.aboutPanel.install_failed_reason', { reason: i18nT(UPDATE_ERROR_KEYS.installUnknown) })}
           askAgent
           testId="update-install-request-error"
         />
@@ -924,7 +952,10 @@ export function AboutPanel() {
   // A manual check's / switch's answer wins; otherwise the background check's,
   // shipped in status. Empty means this layout has no channel to switch.
   const effectiveGwChannel = gwChannel || statusUpdateChannel
-  const showGwChannelSwitcher = !isDesktop && !!effectiveGwChannel
+  // `lts` is the LTS edition's own lane (RFC D11): the backend holds it
+  // there and refuses every switch, and no segment names it. Show it read-only.
+  const gwLtsLane = !isDesktop && effectiveGwChannel === 'lts'
+  const showGwChannelSwitcher = !isDesktop && !!effectiveGwChannel && !gwLtsLane
   // Nightly is not an OFFERABLE destination on any surface. Its builds are
   // untested `main` HEAD, so following that lane is a deliberate install
   // (`cli.sh --channel nightly`), never a one-click flip from a control that
@@ -1052,10 +1083,15 @@ export function AboutPanel() {
                       style={{ color: 'var(--ok)', background: 'color-mix(in oklab, var(--ok) 14%, transparent)' }}
                       data-testid="hero-up-to-date">
                     <span className="w-1.5 h-1.5 rounded-full inline-block" style={{ background: 'var(--ok)' }} /> {i18nT('pages.settings.aboutPanel.up_to_date')}</span>
-                  // No verdict yet (never checked, or the check failed). A green
-                  // "Up to date" here is the same half-truth the check contract
-                  // kills: it would sit beside a red "Couldn't check for updates"
-                  // on this very screen. Stay neutral until something is known.
+                  // No verdict yet. A green "Up to date" here is the same
+                  // half-truth the check contract kills: it would sit beside a
+                  // red "Couldn't check for updates" on this very screen. "Not
+                  // checked yet" only while no check has run: the backend stamps
+                  // `update_last_checked_at` on a failed check too, so the card
+                  // below already says "Last checked ..." and the pill must not
+                  // deny it.
+                  : lastCheckedAt
+                  ? null
                   : <span className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold rounded-full px-2 py-0.5 text-muted bg-bg-accent"
                       data-testid="hero-not-checked">
                     <span className="w-1.5 h-1.5 rounded-full inline-block bg-muted" /> {i18nT('pages.settings.aboutPanel.not_checked_yet')}</span>
@@ -1178,7 +1214,7 @@ export function AboutPanel() {
             <Row label={i18nT('pages.settings.aboutPanel.update_channel')}>
               {info?.channelLockedByPolicy ? (
                 <span className="inline-flex items-center gap-2">
-                  {channel}
+                  {channelLabel(channel)}
                   {/* A build that cannot follow the required channel names both:
                       the lane it is on, and the one the policy requires. */}
                   {info.requiredChannel && info.requiredChannel !== channel && (
@@ -1191,6 +1227,16 @@ export function AboutPanel() {
               ) : channel}
             </Row>
           )
+        )}
+        {gwLtsLane && (
+          <div data-testid="gateway-channel-locked">
+            <Row label={i18nT('pages.settings.aboutPanel.update_channel')}>
+              <span className="inline-flex items-center gap-2">
+                {channelLabel(effectiveGwChannel)}
+                <LockedByPolicyBadge />
+              </span>
+            </Row>
+          </div>
         )}
         {showGwChannelSwitcher && (
           // Gateway (CLI / wheel / cloud source) channel switcher: the same two
@@ -1459,6 +1505,7 @@ export function AboutPanel() {
                   checkIntervalSecs={checkIntervalSecs}
                   botName={botName}
                   autoUpdateSwitch={null}
+                  restartControls={!desktopRestart.available}
                 />
               )}
             </>
@@ -1579,6 +1626,12 @@ export function AboutPanel() {
                 : undefined}
             />
           )}
+          {/* Outside the updater branches for the same reason: restarting is
+              not updating, so an externally managed or dev build gets it too.
+              Where it shows, the gateway-update body above draws no restart of
+              its own, so the card has one; where the app does not run the
+              gateway (an adopted one), that body keeps its own. */}
+          <DesktopGatewayRestartRow state={desktopRestart} />
         </>) : (
           <AboutPanelGatewayUpdates
             gwUpdate={gwUpdate}

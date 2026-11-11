@@ -8,6 +8,7 @@ import { Btn } from '../../components/ui'
 import SimpleSelect from '../../components/SimpleSelect'
 import MarkdownRenderer from '../../components/MarkdownRenderer'
 import ErrorNotice from '../../components/ErrorNotice'
+import { RadioChipGroup, radioChip } from '../../components/RadioChipGroup'
 import { useAvailableModels } from '../../hooks/useAvailableModels'
 import GrillTree from './GrillTree'
 import { grillReducer, promotedResearch, answeredClarifiers, suggestedMaxCycles, GrillNode } from './grillTreeModel'
@@ -171,6 +172,7 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
   const [autoApprove, setAutoApprove] = useState(false)
   const [parallelWorkers, setParallelWorkers] = useState(1)
   const [executionMode, setExecutionMode] = useState<'agent' | 'workflow'>('agent')
+  const executionModeLabelId = useId()
   // Explicit model pick for the campaign's worker. '' = inherit the research
   // agent's / backend's default (never a concrete id). Options come from the
   // shared advertised-models list (GET /api/models), same as every picker.
@@ -252,17 +254,20 @@ function SetupWizard({ onDone, onCancel }: { onDone: () => void; onCancel: () =>
 
       {step === 0 && <div className="space-y-4">
         <div className="p-3 rounded-md bg-bg border border-border">
-          <div className="text-xs text-muted mb-2">{i18nT('apps.autoResearch.researchLabPage.how_sub_agent_execution_is_orchestrated_both_han')}</div>
-          <div className="grid grid-cols-2 gap-2">
-            <button type="button" onClick={() => setExecutionMode('agent')} className={`text-left p-2 rounded border ${executionMode === 'agent' ? 'border-accent bg-accent/10' : 'border-border'}`}>
+          <div id={executionModeLabelId} className="text-xs text-muted mb-2">{i18nT('apps.autoResearch.researchLabPage.how_sub_agent_execution_is_orchestrated_both_han')}</div>
+          {/* One-of-two setting for the campaign: a radio group named by the
+              line above, so the chosen mode is announced, not shown by the
+              accent border alone (#32040). */}
+          <RadioChipGroup ariaLabelledBy={executionModeLabelId} className="grid grid-cols-2 gap-2">
+            <button type="button" {...radioChip(executionMode === 'agent')} onClick={() => setExecutionMode('agent')} className={`text-left p-2 rounded border ${executionMode === 'agent' ? 'border-accent bg-accent/10' : 'border-border'}`}>
               <div className="font-medium text-sm">{i18nT('apps.autoResearch.researchLabPage.agent')} <span className="text-muted font-normal">{i18nT('apps.autoResearch.researchLabPage.adaptive')}</span></div>
               <div className="text-xs text-muted mt-0.5">{i18nT('apps.autoResearch.researchLabPage.the_ai_drives_every_round_itself_deciding_what_t')}</div>
             </button>
-            <button type="button" onClick={() => { setExecutionMode('workflow'); setModel('') }} className={`text-left p-2 rounded border ${executionMode === 'workflow' ? 'border-accent bg-accent/10' : 'border-border'}`}>
+            <button type="button" {...radioChip(executionMode === 'workflow')} onClick={() => { setExecutionMode('workflow'); setModel('') }} className={`text-left p-2 rounded border ${executionMode === 'workflow' ? 'border-accent bg-accent/10' : 'border-border'}`}>
               <div className="font-medium text-sm">{i18nT('apps.autoResearch.researchLabPage.dynamic_workflow')} <span className="text-muted font-normal">{i18nT('apps.autoResearch.researchLabPage.scripted')}</span></div>
               <div className="text-xs text-muted mt-0.5">{i18nT('apps.autoResearch.researchLabPage.the_ai_writes_an_orchestration_script_up_front_a')}</div>
             </button>
-          </div>
+          </RadioChipGroup>
           {executionMode === 'workflow' && (
             <div className="text-xs text-warn mt-2 flex items-start gap-1">
               <AlertTriangle size={12} className="mt-0.5 shrink-0" />
@@ -638,8 +643,9 @@ function SubQuestionAdder({ id, campaign }: { id: string; campaign: Campaign }) 
   </div>
 }
 
-function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: () => void; onFork: (id: string) => void; onOpen: (id: string) => void }) {
+function CampaignDetail({ id, onBack, onFork, onOpen, anotherActive }: { id: string; onBack: () => void; onFork: (id: string) => void; onOpen: (id: string) => void; anotherActive: boolean }) {
   const qc = useQueryClient()
+  const startBlockedId = useId()
   const [sseFailed, setSseFailed] = useState(false)
   // Primary query: refreshed instantly via SSE invalidation; polls only as a
   // fallback when the SSE connection fails (react-query v5 has no useQuery
@@ -672,7 +678,24 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
   // before the DELETE request below is ever sent.
   const [confirmDelete, setConfirmDelete] = useState(false)
   const { data: reportData } = useQuery<{ report: string }>({ queryKey: ['research-report', id], queryFn: () => api.researchReport(id), enabled: showReport })
-  const actionMut = useMutation({ mutationFn: (action: string) => api.researchAction(id, action), onSuccess: () => qc.invalidateQueries({ queryKey: ['research-campaign', id] }) })
+  // The campaign list polls only while some campaign is active, so it can miss one
+  // started elsewhere. Start re-reads it from the gateway first (staleTime 0: the
+  // app's query client never treats a read as stale) and sends nothing when
+  // another campaign is active: the re-read disables Start and shows why.
+  // After any action, refused ones included, both reads are refreshed: otherwise
+  // Back would still list a started campaign as ready, and a refused action leaves
+  // the old status on screen. Returning the re-read keeps the action pending until
+  // both land, so Start stays disabled instead of offering a second start.
+  const actionMut = useMutation({
+    mutationFn: async (action: string) => {
+      if (action === 'start') {
+        const all = await qc.fetchQuery<Campaign[]>({ queryKey: ['research-campaigns'], queryFn: () => api.researchCampaigns(), staleTime: 0 })
+        if (all.some(c => c.id !== id && ACTIVE_STATUSES.includes(c.status))) return null
+      }
+      return api.researchAction(id, action)
+    },
+    onSettled: () => Promise.all([qc.invalidateQueries({ queryKey: ['research-campaign', id] }), qc.invalidateQueries({ queryKey: ['research-campaigns'] })]),
+  })
   const nudgeMut = useMutation({ mutationFn: (text: string) => api.researchNudge(id, text), onSuccess: () => { setShowNudge(false); setNudgeText(''); setAnswerText(''); qc.invalidateQueries({ queryKey: ['research-campaign', id] }) } })
   const deleteMut = useMutation({ mutationFn: () => api.researchDelete(id), onSuccess: () => { setConfirmDelete(false); qc.invalidateQueries({ queryKey: ['research-campaigns'] }); onBack() } })
 
@@ -721,9 +744,14 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
         <button className="text-xs px-2 py-1 rounded bg-bg-elevated" onClick={() => actionMut.mutate('stop')}><Square size={12} className="inline" /> {i18nT('apps.autoResearch.researchLabPage.stop')}</button>
         <button className="text-xs px-2 py-1 rounded bg-bg-elevated" onClick={() => setShowNudge(true)}><MessageCircle size={12} className="inline" /> {i18nT('apps.autoResearch.researchLabPage.nudge')}</button>
       </div>}
+      {/* A ready campaign was created but never started (created through the API,
+          or a create/fork whose start failed); the backend accepts only start from
+          ready. Blocked while another campaign is active, like New campaign. */}
+      {campaign.status === 'ready' && <Btn primary disabled={anotherActive || actionMut.isPending} aria-describedby={anotherActive ? startBlockedId : undefined} onClick={() => actionMut.mutate('start')}><Play size={13} className="lucide-inline" /> {actionMut.isPending ? i18nT('apps.autoResearch.researchLabPage.starting') : i18nT('apps.autoResearch.researchLabPage.start_campaign')}</Btn>}
     </div>
-    {/* Pause / resume / stop act on the persisted campaign — nothing on screen is
-        a draft, so a refused action offers the hand-off. */}
+    {campaign.status === 'ready' && anotherActive && <div id={startBlockedId} className="text-[13px] text-muted mb-4 flex items-center gap-1"><Lock size={13} className="lucide-inline shrink-0" /> {i18nT('apps.autoResearch.researchLabPage.one_campaign_at_a_time_research_benefits_from_fo')}</div>}
+    {/* Start / pause / resume / stop act on the persisted campaign — nothing on
+        screen is a draft, so a refused action offers the hand-off. */}
     <ModelWithheldNotice c={campaign} className="mb-4" />
     {actionMut.isError && <ErrorNotice message={errMsg(actionMut.error)} askAgent className="mb-4" />}
     {campaign.status === 'stagnant' && <div className="p-3 rounded-md mb-4 border border-warn bg-warn/10">
@@ -788,7 +816,7 @@ function CampaignDetail({ id, onBack, onFork, onOpen }: { id: string; onBack: ()
         {reportData?.report ? <ReportSections report={reportData.report} /> : <div className="text-sm text-muted">{i18nT('apps.autoResearch.researchLabPage.no_report_yet')}</div>}
       </div>}
       {sorted.filter(f => f.new_findings_count > 0 || f.cycle === 1).map(f => <FindingCard key={f.cycle} f={f} />)}
-      {findings.length === 0 && <div className="text-sm text-muted">{i18nT('apps.autoResearch.researchLabPage.first_cycle_in_progress')}</div>}
+      {findings.length === 0 && <div className="text-sm text-muted">{campaign.status === 'ready' ? i18nT('apps.autoResearch.researchLabPage.not_started_yet') : i18nT('apps.autoResearch.researchLabPage.first_cycle_in_progress')}</div>}
     </div>
   </div>
 }
@@ -811,7 +839,7 @@ export default function ResearchLabPage() {
 
   if (view === 'wizard') return <div className="px-4 md:px-6 py-4"><h1 className="text-lg font-semibold mb-4">{i18nT('apps.autoResearch.researchLabPage.new_campaign')}</h1><SetupWizard onCancel={() => setView('list')} onDone={() => { qc.invalidateQueries({ queryKey: ['research-campaigns'] }); setView('list') }} /></div>
   if (view === 'fork' && forkParentId) return <div className="px-4 md:px-6 py-4"><h1 className="text-lg font-semibold mb-4">{i18nT('apps.autoResearch.researchLabPage.continue_research')}</h1><ForkFlow parentId={forkParentId} onCancel={() => setView('list')} onDone={() => { qc.invalidateQueries({ queryKey: ['research-campaigns'] }); setView('list') }} /></div>
-  if (view === 'detail' && selectedId) return <div className="px-4 md:px-6 py-4"><CampaignDetail id={selectedId} onBack={() => setView('list')} onFork={(id) => { setForkParentId(id); setView('fork') }} onOpen={(pid) => setSelectedId(pid)} /></div>
+  if (view === 'detail' && selectedId) return <div className="px-4 md:px-6 py-4"><CampaignDetail id={selectedId} onBack={() => setView('list')} onFork={(id) => { setForkParentId(id); setView('fork') }} onOpen={(pid) => setSelectedId(pid)} anotherActive={!!active && active.id !== selectedId} /></div>
 
   return <div className="px-4 md:px-6 py-4">
     <div className="flex items-center justify-between mb-4">

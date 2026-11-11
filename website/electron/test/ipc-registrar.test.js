@@ -37,11 +37,15 @@ const SHELL_HANDLES = [
   "external-terminal:open",
   "first-run:can-use-remote-crew",
   "first-run:use-remote-crew",
+  "gateway:can-restart",
+  "gateway:restart",
   "global-hotkey:get",
   "image:copy-at",
   "local-gateway:get",
   "local-gateway:set",
   "pane:clear-http-cache",
+  "relay-crew:open",
+  "remote-crew:forward-pane-ports",
   "tray-icon:get",
   "tray-icon:set",
   "wsl:detect",
@@ -60,6 +64,7 @@ const SHELL_LISTENERS = [
   "mic:denied",
   "theme-accent-changed",
   "theme-mode-changed",
+  "theme-splash-changed",
   "titlebar-overlay-theme",
   "window-control",
 ].sort();
@@ -207,6 +212,7 @@ function harness({
   externalTerminal = undefined,
   internalSecret = "",
   getRequiredChannel = undefined,
+  relayCrewOpenerOverride = null,
   detectWsl = async () => ({
     available: true,
     distros: [],
@@ -432,6 +438,7 @@ function harness({
     glog: (line) => logs.push(line),
     ...(externalTerminal ? { externalTerminal } : {}),
     ...(getRequiredChannel ? { getRequiredChannel } : {}),
+    relayCrewOpenerOverride,
     // Like main.js's readInternalSecret: the secret belongs to one gateway
     // URL, so a read that names no URL gets nothing.
     readInternalSecret: (gatewayUrl) => {
@@ -535,13 +542,13 @@ test("registerShell owns the exact shell channel set and is idempotent", () => {
 
   assert.deepEqual([...h.handlers.keys()].sort(), SHELL_HANDLES);
   assert.deepEqual([...h.listeners.keys()].sort(), SHELL_LISTENERS);
-  assert.equal(h.handlers.size + h.listeners.size, 42);
+  assert.equal(h.handlers.size + h.listeners.size, 47);
 
   // boot-complete is a further non-update host channel, but it is deliberately
   // gateway-owned and scoped to a single connecting WebContents. Registering it
   // globally here would weaken its sender check and leak listeners.
   assert.match(GATEWAY_SOURCE, /ipcMain\.on\("boot-complete", onComplete\)/);
-  assert.equal(h.handlers.size + h.listeners.size + 1, 43);
+  assert.equal(h.handlers.size + h.listeners.size + 1, 48);
   assert.equal(h.handlers.has("boot-complete"), false);
   assert.equal(h.listeners.has("boot-complete"), false);
 

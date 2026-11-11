@@ -281,6 +281,15 @@ def test_a_refused_skill_file_yields_no_name(tmp_path, monkeypatch):
     assert kas_skill_scope.skill_names([str(path)]) == set()
 
 
+@pytest.mark.parametrize("bom", [b"\xef\xbb\xbf", b""])
+def test_a_skill_saved_with_a_bom_is_named_by_its_frontmatter(tmp_path, bom):
+    path = tmp_path / "dirname" / "SKILL.md"
+    path.parent.mkdir()
+    path.write_bytes(bom + b"---\nname: other\ndescription: d\n---\nbody\n")
+
+    assert kas_skill_scope.skill_names([str(path)]) == {"other"}
+
+
 @pytest.mark.asyncio
 async def test_a_skill_scope_pin_left_on_the_key_does_not_set_the_new_sessions_scope(home):
     from kiro_crew.skill_scope_pin import pin_session_skill_spec
@@ -602,6 +611,31 @@ async def test_a_link_planted_at_a_copy_folder_is_never_written_through(home, tm
 
     assert list(sealed.iterdir()) == []
     assert _copies(entry) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_skill_linked_to_a_prompt_only_secret_is_never_copied(home, tmp_path, monkeypatch):
+    kiro, checkout, _package = home
+    fake_home = tmp_path / "user"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    secret = fake_home / ".config" / "gh" / "hosts.yml"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("oauth_token: gho_not_a_real_token\n", encoding="utf-8")
+    link = kiro / "skills" / "gh_link" / "SKILL.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(secret)
+    _raw_skill(kiro / "skills", "No_Front", "no front matter\n")
+    _agent(kiro, "plain", {"tools": ["fs_read"]})
+
+    entry = await _entry("plain", checkout)
+
+    copies = _copies(entry)
+    assert "no-front" in copies
+    assert "gh-link" not in copies
+    root = paths_mod.data_home() / kas_skill_scope.COPY_DIR_NAME
+    written = [p.read_text(encoding="utf-8") for p in root.rglob("SKILL.md")]
+    assert written and not any("gho_not_a_real_token" in text for text in written)
 
 
 def test_skill_files_past_the_read_bound_are_counted_once(tmp_path, monkeypatch, caplog):

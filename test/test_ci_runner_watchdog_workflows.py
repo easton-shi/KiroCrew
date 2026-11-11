@@ -108,6 +108,7 @@ def test_heal_safe_and_exempt_workflows_form_the_exact_partition() -> None:
         {
             "code-review.yml",
             "dependency-review.yml",
+            "pr-hygiene.yml",
             # The four read-only PR policies as one job: PR-keyed,
             # pull_request-only, publishes nothing.
             "pr-policy.yml",
@@ -116,6 +117,7 @@ def test_heal_safe_and_exempt_workflows_form_the_exact_partition() -> None:
     exempt = frozenset(
         {
             "release.yml",
+            "release-lts.yml",
             "pages.yml",
             "main-ratchet-audit.yml",
             "build-wheel.yml",

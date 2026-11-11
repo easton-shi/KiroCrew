@@ -162,10 +162,14 @@ def attach_kas_custom_agents(
 
     Keys in ``kas_permissions.CREW_ONLY_ENTRY_KEYS`` are dropped here: they are
     Crew's record of what it answers itself at the permission request, not a
-    field the engine defines.
+    field the engine defines. The one that carries the mcp.json reads is applied
+    first, against the ``mcpServers`` array already in *params*
+    (:func:`~kiro_crew.acp.kas_settings_mcp.finish_settings_mcp`).
     """
     if not agents:
         return
+    from kiro_crew.acp.kas_settings_mcp import finish_settings_mcp
+
     meta = params.get("_meta")
     if not isinstance(meta, dict):
         meta = {}
@@ -173,7 +177,9 @@ def attach_kas_custom_agents(
     wire = [
         (
             {
-                **{k: v for k, v in a.items() if k not in CREW_ONLY_ENTRY_KEYS},
+                **{
+                    k: v for k, v in finish_settings_mcp(a).items() if k not in CREW_ONLY_ENTRY_KEYS
+                },
                 "id": kas_wire_agent_id(a["id"]),
             }
             if isinstance(a, dict) and isinstance(a.get("id"), str)
@@ -601,7 +607,10 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _LAUNCH_SHAPED_WORDS,
         BACKGROUND_LAUNCH_LABELS_MAX,
         CODEX_COMPACTION_TITLE,
+        NATIVE_COMPACTION_CANCELLED,
+        NATIVE_COMPACTION_STATES_MAX,
         BackgroundLaunchRecord,
+        NativeCompactionStates,
         _is_launch_shaped,
         _printable_launch_label,
         _service_error_detail,
@@ -609,6 +618,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         parse_background_launch,
         parse_claude_compaction_notice,
         parse_codex_compaction_update,
+        parse_native_compaction_update,
         prompt_is_adapter_command,
         unattributed_terminal_error,
         unrecognised_background_launch,
@@ -629,8 +639,11 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         STRANDS_SIDE_READ_ONLY_REFUSAL,
         StrandsCallIdentity,
         _anchored_in_workspace,
+        _envelope_mcp_owner,
         _is_kas_remote_builtin,
+        _pi_connection_identity,
         _workspace_call_arguments,
+        bridged_title_identity,
         build_permission_event,
         claude_mcp_identity,
         gate_envelope,
@@ -790,7 +803,13 @@ def parse_usage_update(update: dict[str, Any]) -> tuple[int | float | None, int 
                 used = nested.get("used")
             if size is None:
                 size = nested.get("size")
-    return _token_count(used), _token_count(size)
+    used, size = _token_count(used), _token_count(size)
+    # A negative count is no reading: it would make context_pct negative, which
+    # every metadata path clamps out, and a reader keyed on the 0-100 range
+    # (Telegram's context gauge) has no bucket for it.
+    if used is not None and used < 0:
+        used = None
+    return used, size
 
 
 def parse_usage_cost(update: dict[str, Any]) -> float | None:

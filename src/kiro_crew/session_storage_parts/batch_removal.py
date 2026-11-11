@@ -11,7 +11,6 @@ restore or a rolled-back move left holding nothing worth keeping.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from kiro_crew import pinned_fs
@@ -36,6 +35,7 @@ from kiro_crew.session_storage_parts.pinned_delete import (
     _rename_back,
     _scan_tree,
     _stage_batch_by_name,
+    _sweep_staged,
 )
 from kiro_crew.session_storage_parts.store_inventory import invalidate_scan_cache, list_trash
 from kiro_crew.session_storage_parts.store_layout import (
@@ -163,14 +163,9 @@ def _approve_emptied_batch(
         # offer a batch with no manifest either.
         logger.warning("keeping trash batch %r: it has no manifest to identify it", batch.name)
         return SKIP_UNREADABLE
-    try:
-        parsed = _read_manifest(batch, dir_fd=root_fd, expect_ino=scanned_ino)
-    except UnicodeDecodeError:
-        # `_read_manifest` decodes strictly, so non-UTF-8 bytes raise this ValueError
-        # rather than return None. An undecodable manifest withholds the removal like any
-        # unreadable one, instead of aborting a restore that already moved files back.
-        logger.warning("keeping trash batch %r: its manifest is not valid UTF-8", batch.name)
-        return SKIP_UNREADABLE
+    # An undecodable manifest also reads as None here, so it withholds the removal like
+    # any unreadable one instead of aborting a restore that already moved files back.
+    parsed = _read_manifest(batch, dir_fd=root_fd, expect_ino=scanned_ino)
     if parsed is None:
         logger.warning(
             "keeping trash batch %r: its manifest is not readable as the file that was scanned",
@@ -278,7 +273,7 @@ def _remove_emptied_batch(batch: Path, what: str, *, expect: tuple[int, int] | N
             )
             return False
         try:
-            shutil.rmtree(staged)
+            _sweep_staged(staged)
         except OSError as exc:
             # Back under the name the user saw: a batch left under a staging name is one
             # `list_trash` does not offer, so it would be neither visible nor restorable.

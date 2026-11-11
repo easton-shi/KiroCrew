@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -23,10 +22,14 @@ from enum import Enum
 from typing import Any
 
 from kiro_crew import name_grant, permission_floor
+from kiro_crew.approval_mode_policy import session_mode_permitted
 from kiro_crew.atomic_write import atomic_write
+from kiro_crew.channel_account_check import session_after_account_check
+from kiro_crew.channel_shell_base import _offerable_base_binary
+from kiro_crew.channel_spec_hooks import pre_tool_refusal, turn_spec
 from kiro_crew.config import KiroCrewConfig, live
 from kiro_crew.config.fields import _safe_int
-from kiro_crew.config.loader import config_local_path, config_path, read_config_text
+from kiro_crew.config.loader import config_local_path, config_path, read_endorsed_config_text
 from kiro_crew.config.paths import config_dir
 from kiro_crew.config.resolution import _deep_merge
 from kiro_crew.constants import (
@@ -119,27 +122,6 @@ CHANNEL_AGENT_BLOCKED_DISPATCH_TOOLS: tuple[str, ...] = (
     "register_hook",
     "pod_up",
     "pod_restart",
-)
-
-# One tool on the same boundary cannot be held by NAME.  ``ops_mission_control_api``
-# is a passthrough: one tool carrying a whole API surface, most of which reads.
-# ``POST /rotation/arm`` is the operation that starts work outliving the turn --
-# it arms the app's crons, which then fire unattended once the confined turn has
-# ended -- so the deny is keyed on the operation and the tool's read surface stays
-# reachable.  Method and path are the two fields that identify an operation; the
-# tool's own schema admits nothing but an exact member of its allowlist in
-# either, so an operation named here cannot be reached under a second spelling.
-#
-# Enforced at MCP dispatch alone, unlike the name list, which is also matched at
-# the permission-request event: that matcher reads the rendered title, where an
-# operation does not appear.  Containment still holds, because the dispatch guard
-# is what refuses the call -- approving the prompt only means the refusal arrives
-# one step later, and the interactive guard's job is to beat an AUTO-approval,
-# which the dispatch guard beats as well.
-CHANNEL_AGENT_BLOCKED_DISPATCH_OPERATION: tuple[str, str, str] = (
-    "ops_mission_control_api",
-    "POST",
-    "/rotation/arm",
 )
 
 # Direct-to-user messaging tools a channel agent may never invoke — channel
@@ -251,17 +233,16 @@ CHANNEL_AGENT_BLOCKED_TOOLS: tuple[str, ...] = (
     # Lists archived session titles and keys: a channel thread other people
     # read is not where the person's closed-session history belongs.
     "session_history_list",
-    # The four work-ledger tools, blocked for the same containment reason and not
-    # for a new one: a channel agent has no dispatch relationship, so it is
-    # neither a conductor nor a bound worker and has no business holding one.
-    # Reading a brief would pull a private dispatch's acceptance bar into a
-    # channel other humans can see, and a report or a record would write into a
-    # conductor's own decision record from outside it.
+    # The kirocrew-work tools: a channel agent has no dispatch relationship, so it
+    # is neither a conductor nor a bound worker. A brief would pull a private bar
+    # into a channel others see; a report or record writes a conductor's record.
+    # The check conducts, and the evaluator's file kind probes paths.
     "work_brief",
     "work_report",
     "work_ledger_read",
     "work_ledger_record",
     "work_ledger_rebuild",
+    "accept_eval",
 ) + CHANNEL_AGENT_BLOCKED_DISPATCH_TOOLS
 
 # Boundary-aware matcher: the tool name must stand alone in the rendered
@@ -295,88 +276,6 @@ _MCP_SEPARATOR_RE = re.compile(r"_{2,}")
 # over-blocked -- the same filename-versus-tool confusion the negative cases
 # in ``test_channel_blocked_tools.py`` exist to catch.
 _CREW_MCP_SERVER_PREFIX_RE = re.compile(r"(?<![\w.\-/])kirocrew-[A-Za-z0-9-]+_")
-
-
-def _shell_base_binary(cmd: str) -> str | None:
-    """The single binary a SIMPLE shell command invokes, else None.
-
-    Shell-aware (shlex) tokenization, fail-closed on everything that is not
-    one plain invocation: parse failures, empty commands, shell operators or
-    substitution anywhere (``|``, ``&``, ``;``, newline, backtick, ``$(``,
-    redirects), and env-assignment or quoted/space-bearing first tokens. A
-    base-command trust grant keyed on anything richer than one unambiguous
-    binary name has already been shown to widen scope (naive first-token
-    slicing turned ``"./my tool" --safe`` into a ``"./my`` prefix grant, and
-    env prefixes into match-anything grants), so anything ambiguous simply
-    has no base.
-    """
-    if not cmd or _CHANNEL_SHELL_OPERATOR_RE.search(cmd):
-        return None
-    try:
-        tokens = shlex.split(cmd)
-    except ValueError:
-        return None
-    if not tokens:
-        return None
-    base = tokens[0]
-    # An env-assignment first token means the binary is the SECOND token —
-    # refuse rather than guess (the grant would silently cover any command
-    # run under that prefix).
-    if not base or "=" in base:
-        return None
-    # A base containing whitespace can only come from quoting; a quoted
-    # executable path is matched by the exact-command tier, not by base.
-    if any(c.isspace() for c in base):
-        return None
-    # POSITIVE shape check: the base must look like a plain binary name or
-    # path. Enumerating bad metacharacters one by one (``!``, ``(``, …) is a
-    # losing game — the shell always has one more; anything outside this
-    # conservative charset is refused instead.
-    if not _CHANNEL_BASE_BINARY_RE.fullmatch(base):
-        return None
-    # Shell reserved words pass the charset but are interpreted by the shell,
-    # not executed as a binary — ``time rm ...`` must not yield a ``time``
-    # grant that covers ``time <anything>``.
-    if base in _CHANNEL_SHELL_RESERVED_WORDS:
-        return None
-    return base
-
-
-def _offerable_base_binary(cmd: str) -> str | None:
-    """The base a "Trust all <base> commands" consent may name, else None.
-
-    ``_shell_base_binary`` tokenizes in POSIX mode, where a backslash is an
-    escape, so the Windows path ``.\\deploy.bat`` derives ``.deploy.bat``: a
-    name the user never typed, and one that also covers a different file
-    literally called ``.deploy.bat``. A consent label must name what the user
-    read, so a first token holding a backslash gets no base offer and no base
-    grant; the exact-command tier still covers that command.
-    """
-    stripped = cmd.lstrip() if cmd else ""
-    first = stripped.split(None, 1)[0] if stripped else ""
-    if "\\" in first:
-        return None
-    return _shell_base_binary(cmd)
-
-
-# Anything that makes a command more than ONE plain invocation. Deliberately
-# broader than the enforcement splitter's operator set: over-matching here
-# fails toward "no per-command grant available", never toward a wider grant.
-# Parentheses and braces cover subshell / brace grouping — "(rm /tmp/a)" must
-# not yield "(rm" as a trusted binary.
-_CHANNEL_SHELL_OPERATOR_RE = re.compile(r"[|&;`\n\r<>(){}]|\$\(")
-
-# What a trusted base binary is ALLOWED to look like: alphanumerics plus the
-# few characters real binary names and paths use. Everything else — negation
-# ``!``, test ``[``, arithmetic ``((`` — simply has no derivable base.
-_CHANNEL_BASE_BINARY_RE = re.compile(r"[A-Za-z0-9._/+-]+")
-
-# Words the shell interprets instead of executing. A grant keyed on one would
-# cover whatever command the shell runs under it.
-_CHANNEL_SHELL_RESERVED_WORDS = frozenset(
-    "! case coproc do done elif else esac fi for function if in select "
-    "then time until while".split()
-)
 
 
 def _match_trusted_channel_command(cmd: str, agent: "ChannelAgent") -> str | None:
@@ -599,6 +498,13 @@ class Channel:
         if not agent:
             return False
         agent.state = "done"
+        # Stop its loop as ``ChannelManager.close`` does. Left running, a working
+        # member wrote "listening" back over "done", kept consuming, and held its
+        # session until the gateway exited; close cannot reach it either, since it
+        # cancels only members still in the room. The loop's ``finally`` releases
+        # the session and keeps "done".
+        if agent._task and not agent._task.done():
+            agent._task.cancel()
         self._broadcast(
             "channel_agent_left",
             {
@@ -1122,6 +1028,11 @@ async def run_channel_agent(
             )
             orch_toplevel = agent.is_orchestrator and (is_toplevel_human or is_agent_report_back)
             tid = None if orch_toplevel else (msg.thread_id or msg.id)
+            client = await session_after_account_check(
+                sessions, agent, client, channel, tid, _reset_busy_session
+            )
+            if client is None:
+                break
             if sessions.get_provider(agent.session_key) is not client:
                 # IDENTITY, not presence: a clear-context discard pops this key and shuts the
                 # cached provider down, and a later claim can re-register a DIFFERENT one under it.
@@ -1283,7 +1194,7 @@ def _lost_give_up_text(agent: Any) -> str:
 
 
 async def _reset_busy_session(sessions: Any, agent: ChannelAgent) -> Any | None:
-    """Replace *agent*'s wedged session and return a lease on a cold one.
+    """Replace *agent*'s wedged or account-flagged session and return a lease on a cold one.
 
     ``SessionManager.reset`` pops the registry entry and never awaits its
     semaphore, so resetting while ``run_channel_agent`` still holds the permit
@@ -1416,7 +1327,7 @@ def _written_approval_window() -> int:
     merged: dict = {}
     for path in (config_path(), config_local_path()):
         try:
-            document = json.loads(read_config_text(path))
+            document = json.loads(read_endorsed_config_text(path))
         except (OSError, ValueError):
             continue
         if isinstance(document, dict):
@@ -1485,6 +1396,8 @@ async def _stream_task(
     tool_seen = False
 
     try:
+        # Read before anything streams, as a channel bot's turn reads it.
+        spec = await turn_spec(client, agent.agent_name)
         async for event in client.stream(message):
             if event.kind == EVENT_TEXT_CHUNK:
                 chunks.append(event.text)
@@ -1552,6 +1465,11 @@ async def _stream_task(
                     agent=agent.agent_name,
                     security_only=False,
                 )
+                _gate_outcome = "rejected_hook_deny"
+                if _gate_reason is None:
+                    # Then the agent spec's own PreToolUse hooks, where Crew runs them.
+                    _gate_reason = await pre_tool_refusal(spec, client, event, agent.session_key)
+                    _gate_outcome = "rejected_spec_hook"
                 if _gate_reason is not None:
                     sel().log_tool_invocation(
                         session_key=agent.session_key,
@@ -1559,7 +1477,7 @@ async def _stream_task(
                         source="channel",
                         # Permission events populate ``title``; ``text`` is empty.
                         tool_name=event.text or event.title,
-                        outcome="rejected_hook_deny",
+                        outcome=_gate_outcome,
                         metadata={"reason": _gate_reason},
                     )
                     # The gate judged the call itself: a policy verdict, with
@@ -1577,7 +1495,7 @@ async def _stream_task(
                 # YOLO mode (global) or channel trust — auto-approve. A
                 # ``gateway --approval yolo`` grant is for dashboard chats only.
                 _yolo = bool(is_yolo and is_yolo()) and safety_override().is_cli_launch is not True
-                if _yolo or channel.trusted:
+                if _yolo or (channel.trusted and session_mode_permitted("trust")):
                     approval_outcome = (
                         "auto_approved_yolo" if _yolo else "auto_approved_channel_trust"
                     )
@@ -1622,6 +1540,8 @@ async def _stream_task(
                 _cmd = (
                     extract_bash_command(event.tool_input) if _is_shell and event.tool_input else ""
                 )
+                # Non-None past this block only for a matched grant that was declined.
+                _ng_refusal: name_grant.Refusal | None = None
                 if (agent._trusted_commands or agent._trusted_bases) and _cmd:
                     matched = _match_trusted_channel_command(_cmd, agent)
                     if matched:
@@ -1790,6 +1710,22 @@ async def _stream_task(
                     )
                     await client.reject_tool(event.request_id)
                     continue
+                # A host refusing every name grant records a per-command tier that never
+                # auto-approves, so the card must not promise it. Read before the Future
+                # exists (a cancel would leak it); a failed read must not wedge the turn,
+                # and reads as refused, as a failed grant check declines.
+                try:
+                    _grants_refused = (
+                        _command_grantable
+                        and (await asyncio.to_thread(name_grant.environment_refusal)) is not None
+                    )
+                except Exception:
+                    logger.exception("name-grant environment check failed")
+                    _grants_refused = True
+                _prose = f"⚠️ Approval needed: **{sanitized_name}**\n```\n{sanitized_input}\n```"
+                if _ng_refusal is not None:
+                    # ``log_text`` is a constant; ``detail`` is built from the unredacted command.
+                    _prose += f"\nAsking again even though this is trusted: {_ng_refusal.log_text}."
                 loop = asyncio.get_running_loop()
                 # Bind-target for a per-command trust decision on THIS
                 # approval: the canonical shell command ("" for non-shell
@@ -1801,7 +1737,7 @@ async def _stream_task(
                 approval_future = loop.create_future()
                 agent._pending_approval_command = _cmd if _command_grantable else ""
                 agent._approval_future = approval_future
-                # The card's structured facts, beside the unchanged prose. The
+                # The card's structured facts, beside the prose. The
                 # server is the only side that can refuse a per-command tier
                 # (``handlers_channel.approve``), so it states here which
                 # tiers THIS approval can record: ``command_grantable`` gates
@@ -1821,6 +1757,7 @@ async def _stream_task(
                     "command_grantable": "1" if _command_grantable else "",
                     "base_derivable": "1" if _base_binary else "",
                     "base_command": _base_binary or "",
+                    "name_grants_refused": "1" if _grants_refused else "",
                 }
                 _approval_timed_out = False
                 _approval_window = _APPROVAL_TIMEOUT_SECS
@@ -1833,7 +1770,7 @@ async def _stream_task(
                     _approval_window = await asyncio.to_thread(_channel_approval_window_secs)
                     await channel.post(
                         agent.id,
-                        f"⚠️ Approval needed: **{sanitized_name}**\n```\n{sanitized_input}\n```",
+                        _prose,
                         from_role=agent.role,
                         msg_type="approval",
                         thread_id=thread_id,
@@ -1853,6 +1790,8 @@ async def _stream_task(
 
                 if decision not in ("approved", "rejected", "trust"):
                     decision = "rejected"
+                elif decision == "trust" and not session_mode_permitted("trust"):
+                    decision = "approved"  # a denied ``trust`` press approves this tool only
 
                 if decision in ("approved", "trust") and _is_shell and _cmd:
                     # A human read this exact command and said yes: record the
@@ -1957,7 +1896,10 @@ async def _stream_task(
         )
         return _STREAM_OK
 
-    full_text = "".join(chunks).strip()
+    # kiro-cli's [STEERING steer-…] ack is protocol, not the reply.
+    from kiro_crew.messaging.driver import strip_steering_markers
+
+    full_text = strip_steering_markers("".join(chunks)).strip()
     if not full_text:
         return _STREAM_OK
     # Sanitize LLM output before posting

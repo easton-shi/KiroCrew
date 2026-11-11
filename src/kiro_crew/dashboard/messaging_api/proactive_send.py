@@ -411,6 +411,31 @@ async def api_update_message(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "text or blocks required", "code": "content_required"}, status=400
         )
+    # The calling app's own messaging grant, as every send_message egress leg asks
+    # it: an edit publishes new agent-authored text to the message's audience, so
+    # an app whose messaging is revoked must not reach Slack by editing a post it
+    # made earlier. Asked before the owner DM is resolved, because opening a DM is
+    # itself visible to the recipient.
+    app_refusal = await asyncio.to_thread(
+        _vet_app_messaging,
+        effective_request_app(state, request),
+        request.headers.get("X-Session-Key", ""),
+        tool_name="update_message",
+    )
+    if app_refusal:
+        _sel().log_tool_invocation(
+            session_key="api",
+            source="api",
+            tool_name="update_message",
+            tool_kind="slack",
+            outcome="denied",
+            downstream_service="slack",
+            resources=f"channel={channel}",
+        )
+        return web.json_response(
+            {"error": f"slack edit refused: {app_refusal}", "code": "channel_not_permitted"},
+            status=403,
+        )
     # A DM is authorized by IDENTITY, a room by the tracked-channel allowlist --
     # and a DM must be the CURRENT owner's, not merely D-prefixed. Passing every
     # `D...` on the prefix alone would leave any DM this bot ever posted in a
@@ -881,7 +906,11 @@ async def _deliver_send_message_fallback(
 
     Each leg records what it reached on *outcome* as it goes.
     """
+    # Function-local like ``redact`` below: the facade rebinds this function
+    # onto ``handlers.messaging``'s globals, where a module-level import here
+    # would not exist.
     from kiro_crew.security import redact
+    from kiro_crew.slack.mrkdwn_markdown import mrkdwn_to_markdown
 
     # Snapshot before the suffix below: that sentence describes the BELL's
     # delivery, and a channel post is a real delivery, not the
@@ -901,10 +930,29 @@ async def _deliver_send_message_fallback(
     publisher = None if options else attribution_session or None
     # The link back to the sender stays even then: a question is where it is needed most.
     session_meta = _publishing_session_meta(state, attribution_session)
+    # Two grammars, one call: a Slack-bound ``text`` is written in Slack mrkdwn,
+    # while the bell renders Markdown, so Slack links (``<url|label>``) and
+    # emphasis arrive broken in the bell. Convert the BELL's copy only — the
+    # legs below must deliver exactly what the caller wrote. ``send_to_slack``
+    # is the gate: false whenever a ``channel_target``/``channel_type`` send
+    # carries another channel's format, true when the send is Slack-routed.
+    # The cron owner-DM default keeps it true even on an install with no Slack
+    # client, where the body may already be Markdown — accepted, because the
+    # converter leaves Markdown constructs and URL-shaped spans untouched and
+    # only single-delimiter emphasis (``*x*``, mrkdwn bold) changes weight.
+    bell_text = text
+    if send_to_slack:
+        bell_text = mrkdwn_to_markdown(text)
+        # Conversion is a rendering step AFTER the route's display scan: it
+        # removes characters (the sentinel strip) and collapses sigils the
+        # scan may have read as a split inside a secret, so the converted
+        # copy is re-scanned in its own settled form before it is stored.
+        # The legs below still send the already-scanned original bytes.
+        bell_text, _ = redact_for_display(bell_text, _redact_all)
     state.notify(
         "agent",
         title,
-        text,
+        bell_text,
         meta=session_meta,
         member=member,
         publisher_session=publisher,
@@ -967,12 +1015,14 @@ async def _deliver_send_message_fallback(
             )
         )
     if channel_type:
-        outcome.sent_channel = await _deliver_to_channel(
-            state,
-            _channel_delivery_key(state, caller_session, declared_session),
-            _with_source_line(channel_text, source_line if is_cron_caller else ""),
-            channel_type=channel_type,
-            markdown=markdown,
+        outcome.sent_channel, outcome.channel_code, outcome.channel_detail = (
+            await _deliver_to_channel(
+                state,
+                _channel_delivery_key(state, caller_session, declared_session),
+                _with_source_line(channel_text, source_line if is_cron_caller else ""),
+                channel_type=channel_type,
+                markdown=markdown,
+            )
         )
     # Opt-in "Open session" deep-link button: resolved (server-side) only
     # when the caller asked for it AND this send actually reaches Slack.

@@ -133,8 +133,10 @@ cross-home flake three tests later.
      shutdown, which would keep the next boot's writer from starting.
    * ``sandbox._SHIM_ARGV_CACHE`` -- the spawn shim's resolved argv, derived
      from the boot's config and home.
+   * ``apps.credential_masks._cache`` -- the parsed ``credentialMasks`` of
+     every app manifest the boot's spawns read, keyed on the home's paths.
    * ``config.loader`` materialized-agent snapshot (``_MATERIALIZED_AGENTS``,
-     ``_MATERIALIZED_STEMS``, ``_MATERIALIZED_SEEN``, ``_MATERIALIZED_COMPLETE``, ``_MATERIALIZED_SKIPPED``,
+     ``_MATERIALIZED_STEMS``, ``_MATERIALIZED_SEEN``, ``_MATERIALIZED_COMPLETE``, ``_MATERIALIZED_MEMO``,
      ``_MATERIALIZED_AGENTS_READY``) -- the declared names, file-name map,
      removal evidence and scan completeness of the home's
      ``kiro/agents`` directory, which the next boot would read as its own until
@@ -181,6 +183,10 @@ cross-home flake three tests later.
      Grant writers and gate checks fill it whenever no live snapshot is up,
      so whether a boot leaves one, and from which home, depends on timing; a
      fresh process has none.
+   * ``recall_pool._settings_cache`` -- the home's ``memory.recall_pool_*``
+     settings with the time they were read, reused for one second. Every
+     recall read refreshes it, so whether a boot leaves one, and how old, depends
+     on timing; a fresh process has none.
    * ``config.loader_credentials._boot_raw_env`` -- the raw ``.env`` map the
      first ``load_credentials`` of the process recorded, which the live watcher
      seeds its credential diff baseline from. It is home-derived and
@@ -282,12 +288,14 @@ from kiro_crew import (
     github_runner,
     memory_startup,
     onboarding_sources,
+    recall_pool,
     safety_override,
     sandbox,
     shutdown_event,
 )
 from kiro_crew.acp import client as acp_client
 from kiro_crew.agent_sdk import host_auth
+from kiro_crew.apps import credential_masks
 from kiro_crew.apps.builtin_adoption_pins import HARNESS_PINS_ENV, load_adoption_pins
 from kiro_crew.config import live as config_live
 from kiro_crew.config import loader as config_loader
@@ -784,6 +792,7 @@ def _reset_home_bound_globals() -> None:
     token_auth._revoked_store_singleton = None
     token_auth._state.clear_all()
     token_auth._app_perms_cache.clear()
+    token_auth._app_perms_denied.clear()
     revocation_gen._gen = None
     crash_guard._CRASH_LOG = None
     config_live.reset_for_tests()
@@ -805,13 +814,15 @@ def _reset_home_bound_globals() -> None:
     sandbox._SLICE_MEMHIGH_EVENTS_SEEN = None
     sandbox._SLICE_OOM_SEEN = None
     sandbox._SHIM_ARGV_CACHE.clear()
+    credential_masks.clear_cache()
     config_loader._MATERIALIZED_AGENTS = frozenset()
     config_loader._MATERIALIZED_STEMS.clear()
     config_loader._MATERIALIZED_SEEN.clear()
     config_loader._MATERIALIZED_COMPLETE = False
-    config_loader._MATERIALIZED_SKIPPED = None
+    config_loader._MATERIALIZED_MEMO = None
     config_loader._MATERIALIZED_AGENTS_READY = False
     governance._CONFIRM_PATTERNS_MEMO = None
+    recall_pool._settings_cache = None
     dashboard_updates._auto_effect = None
     dashboard_updates._auto_effect_task = None
     dashboard_updates._shape_effect = None
@@ -886,7 +897,7 @@ def home_bound_globals_are_clear() -> bool:
         and not config_loader._MATERIALIZED_STEMS
         and not config_loader._MATERIALIZED_SEEN
         and not config_loader._MATERIALIZED_COMPLETE
-        and config_loader._MATERIALIZED_SKIPPED is None
+        and config_loader._MATERIALIZED_MEMO is None
         and not config_loader._MATERIALIZED_AGENTS_READY
         and governance._CONFIRM_PATTERNS_MEMO is None
         and config_loader._boot_raw_env is None

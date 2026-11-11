@@ -811,6 +811,14 @@ class LLMProvider(ABC):
         return None
 
     @property
+    def harness_pin(self) -> str:
+        """The Bot pin this provider's runtimes carry for KAS's route rule 2, ``""`` for none.
+
+        Read by a companion runtime built on this provider's behalf (H14).
+        """
+        return ""
+
+    @property
     def work_scratch_dir(self) -> "Path | None":
         """The ``$KIROCREW_SCRATCH`` directory the RUNTIME serving this session
         exposes, or ``None`` when it has none.
@@ -1051,6 +1059,16 @@ class LLMProvider(ABC):
     def supports_effort(self) -> bool:
         """True when the current model accepts a reasoning-effort level. Default False."""
         return False
+
+    def ultracode_enabled(self) -> bool | None:
+        """Whether the session's ultracode switch is on; ``None`` (the default) when
+        the session offers no such switch."""
+        return None
+
+    async def set_ultracode(self, enabled: bool) -> bool | None:
+        """Turn the session's ultracode switch on or off and return the value read
+        back. Default ``None``: no switch, nothing sent."""
+        return None
 
     async def change_effort(self, level: str) -> bool:
         """Change reasoning effort live for the current model. Returns True on success,

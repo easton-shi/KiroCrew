@@ -136,7 +136,7 @@ _DURABLE_QUEUE_KEYS: tuple[str, ...] = (
 
 
 def _is_durable_queue_entry(item: Any) -> bool:
-    """True when *item* is a plain user prompt a restart may hand back.
+    """True when *item* is a queued prompt a restart may hand back.
 
     The queue holds two populations and only one of them survives its process.
     A plain user prompt is the user's own words, waiting for the running turn
@@ -154,7 +154,17 @@ def _is_durable_queue_entry(item: Any) -> bool:
     - an entry carrying a ``kind`` is an injection whose producer is gone: a
       cron notification, a subagent completion, a plan approval. Its content
       names an event, and a restart is not that event happening again.
+
+    One kind is the exception: a heartbeat prompt (``HEARTBEAT_PROMPT_KIND``)
+    carries a finished task's report, which nothing else delivers into this
+    chat, so it is kept as the plain prompt it would be without the kind. The
+    writer emits no kind (:data:`_DURABLE_QUEUE_KEYS`) and the reader restores
+    none (:func:`sanitize_restored_queue`), so the restored entry is that plain
+    prompt: what a heartbeat prompt queued with no kind restores as.
     """
+    # circular import: chat_utils_injected_rows imports this module.
+    from kiro_crew.dashboard.chat_utils_injected_rows import HEARTBEAT_PROMPT_KIND
+
     if not isinstance(item, dict):
         return False
     content = item.get("content")
@@ -164,7 +174,8 @@ def _is_durable_queue_entry(item: Any) -> bool:
         return False
     if item.get("payload"):
         return False
-    if item.get("kind"):
+    kind = item.get("kind")
+    if kind and kind != HEARTBEAT_PROMPT_KIND:
         return False
     return True
 
@@ -259,10 +270,6 @@ def warn_if_not_durable(queue: list[dict[str, Any]], entry_id: str, slot_key: st
     large prompt can be refused at position 3 — so anything that re-implemented
     them here would answer differently from the writer for exactly the entries
     this exists to report.
-
-    Not a receipt field. A caller-visible ``durable`` boolean on the enqueue
-    acknowledgments has no reader, so it is not shipped; the on-screen queue-card
-    marker belongs with its consumer.
     """
     if not entry_id:
         return False
@@ -286,6 +293,13 @@ def warn_if_not_durable(queue: list[dict[str, Any]], entry_id: str, slot_key: st
         len(kept),
     )
     return False
+
+
+def refused_durable_ids(queue: list[dict[str, Any]]) -> set[str]:
+    """The ids of the queued user prompts the durable write will not keep, read off
+    :func:`durable_queue_entries`' own output as :func:`warn_if_not_durable` is."""
+    kept = {entry["id"] for entry in durable_queue_entries(queue)}
+    return {item["id"] for item in queue if _is_durable_queue_entry(item)} - kept
 
 
 def durable_queue_view(queue: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -932,14 +946,20 @@ class SlotQueueRepository:
             # the linked-thread mirror suppressed, so a human on the mirrored
             # channel never sees what the user typed. Refused, not re-kinded:
             # the entry is not a user prompt to begin with. Scoped to the app
-            # kind alone: other system kinds (queued cron text among them)
-            # were editable before this endpoint existed, and taking that
-            # away is not this feature's call. The frontend pencil gate
-            # (`isAppMessageQueued`) withholds exactly this same set.
+            # kind and the gateway's own prompts (a workflow follow-up, a
+            # heartbeat prompt): other system kinds (queued cron text among
+            # them) were editable before this endpoint existed, and taking that
+            # away is not this feature's call. The frontend withholds the same
+            # set: the app card's pencil (`isAppMessageQueued`), a gateway
+            # prompt's whole card (`isNonInteractiveQueued`).
             from kiro_crew.dashboard.chat_utils import MCP_APP_MESSAGE_KIND
-            from kiro_crew.dashboard.chat_utils_injected_rows import AUTOMATION_STEER_META
+            from kiro_crew.dashboard.chat_utils_injected_rows import (
+                AUTOMATION_STEER_META,
+                GATEWAY_PROMPT_INJECT_KINDS,
+            )
 
-            if item.get("kind") == MCP_APP_MESSAGE_KIND:
+            kind = item.get("kind")
+            if kind == MCP_APP_MESSAGE_KIND or kind in GATEWAY_PROMPT_INJECT_KINDS:
                 return False
             # The lists index the OLD text's markers; drop only what this edit
             # removed (named before, unnamed now) and renumber the survivors

@@ -67,10 +67,11 @@ class SessionConfig:
             "still ends it. On the kiro-cli or KAS backend, a Kiro sign-out from the dashboard "
             "ends it at once, whatever account it signed in with. After any other switch or "
             "sign-out of the Kiro account it signed in with, the next dashboard chat turn ends "
-            "it, and so does the next agent cron run unless Kiro Crew then cannot tell which "
+            "it, and so does the next session start or reuse elsewhere, such as an agent cron "
+            "run, a channel reply or a task step, unless Kiro Crew then cannot tell which "
             "account is signed in, as with a social login. A session that "
             "is mid-turn then ends later instead, when its next turn starts or at a later "
-            "dashboard chat turn or agent cron run. At most 10 keys are kept.",
+            "dashboard chat turn or session start. At most 10 keys are kept.",
         ),
     )
     empty_response_auto_continue: bool = field(
@@ -244,6 +245,18 @@ class SessionConfig:
             "this many MiB (default 4096). 0 disables; the internal background "
             "runtime recycles at 1536 MiB, or at this value when it is lower. Busy sessions (turn in "
             "flight) are never recycled.",
+        ),
+    )
+    watchdog_end_leftovers_mid_turn: bool = field(
+        default=False,
+        metadata=_meta(
+            "End Leftover Processes During a Turn",
+            "When a session is over the Watchdog RSS Limit during a turn and the "
+            "memory is held by processes its commands left running outside the "
+            "agent's process tree (for example a job a timed-out shell command "
+            "started), end those processes at once instead of only reporting them. "
+            "Off by default: such a process can be work the agent started on purpose. "
+            "Linux only. Read every cleanup tick, so a change needs no restart.",
         ),
     )
     harness_background_hold_secs: int = field(
@@ -420,6 +433,23 @@ class KiroCrewAgentConfig:
             "dragging its row there. 1 is the top; 0 means not placed yet, which "
             "sorts after every placed crew. Cleared when the crew is unstarred. "
             "Purely a display preference, like starred.",
+        ),
+    )
+    # Preview, off by default: a crewmate must opt in before any Dashboard card
+    # button can send a turn. Absent or non-bool reads as off (see card_send),
+    # so this changes nothing until it is turned on and the page-to-host `send`
+    # behaves exactly as `act` (fill the composer) meanwhile.
+    dashboard_card_send: bool = field(
+        default=False,
+        metadata=_meta(
+            "Dashboard card send (preview)",
+            "Preview, off by default. When on, a button on this crewmate's "
+            "Dashboard tab may send its reply straight into the crewmate's own "
+            "thread with one click. Off (the default), such a button only puts "
+            "the reply in the chat box and the person presses send, which is what "
+            "every card did before. A card-sent turn is tagged '[Dashboard "
+            "card]', is never an approval, and is refused while the thread has an "
+            "open approval or question.",
         ),
     )
     # Per-agent watchdog window overrides. The global ``watchdog.tool_stall_*``
@@ -720,6 +750,11 @@ class ResolvedBindings:
     # Revision observed before resolution: "" means no protected record;
     # None means no observation was made. Only automatic publication uses it.
     selection_revision: str | None = None
+    # For a ``member`` record: the agent a NEW chat with its member runs now
+    # (``member_template_id``), "" for any other session. It differs from
+    # ``kiro_agent`` once the member is set to another agent than the record
+    # keeps, which the chat then tells its user; this turn never runs it.
+    new_chat_agent: str = ""
 
     def same_dispatch_binding(self, other: "ResolvedBindings") -> bool:
         """Whether two resolutions name the SAME dispatch target.
@@ -740,6 +775,7 @@ class ResolvedBindings:
         from ``memory_store_name`` plus global config shared by both sides).
         ``execution_context`` carries the admitted session's identity and mode;
         session selection checks those separately before comparing these targets.
+        ``new_chat_agent`` is what another chat would run, not this one's target.
         """
         return (
             self.kiro_agent == other.kiro_agent

@@ -54,7 +54,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "fork-pr-description.yml"
-# The rules themselves: one script, shared with PR Hygiene in code-review.yml.
+# The rules themselves: one script, shared with PR Hygiene in pr-hygiene.yml.
 SCRIPT = ROOT / ".github" / "scripts" / "pr-description-check.sh"
 
 pytestmark = pytest.mark.skipif(
@@ -705,13 +705,18 @@ def test_it_never_checks_out_fork_code() -> None:
     On `pull_request_target` checkout's default ref is the base; naming any ref
     (the PR head above all) would run fork-controlled rules with a write token.
     """
-    checkouts = [s for s in _doc()["jobs"]["describe"]["steps"] if "uses" in s]
-    assert len(checkouts) == 1
+    uses = [s["uses"] for s in _doc()["jobs"]["describe"]["steps"] if "uses" in s]
+    # The only other action is the rate-limit wrapper, read from that same
+    # base checkout.
+    assert uses[1:] == ["./.github/actions/gh-rate-limit"]
+    checkouts = [s for s in _doc()["jobs"]["describe"]["steps"] if "uses" in s][:1]
     assert checkouts[0]["uses"].startswith("actions/checkout@")
     # The whole `with` mapping, so neither `ref` nor `repository` can point it at the fork.
     assert checkouts[0]["with"] == {
         "persist-credentials": False,
-        "sparse-checkout": ".github/scripts/pr-description-check.sh",
+        "sparse-checkout": (
+            ".github/scripts/pr-description-check.sh\n.github/actions/gh-rate-limit/action.yml\n"
+        ),
         "sparse-checkout-cone-mode": False,
     }
     assert _step("Evaluate PR description")["run"].strip() == (
@@ -727,7 +732,7 @@ def test_pr_hygiene_runs_the_same_rules_for_every_pr() -> None:
     """Fork and same-repo PRs must follow one rule set, so PR Hygiene -- which
     blocks PR Readiness -- runs the same script and fails on its verdict."""
     doc = yaml.safe_load(
-        (ROOT / ".github" / "workflows" / "code-review.yml").read_text(encoding="utf-8")
+        (ROOT / ".github" / "workflows" / "pr-hygiene.yml").read_text(encoding="utf-8")
     )
     steps = doc["jobs"]["pr-hygiene"]["steps"]
     step = next(s for s in steps if s.get("name") == "Require the PR template sections")

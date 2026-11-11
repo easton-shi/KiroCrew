@@ -534,6 +534,15 @@ class TestMiscSlashCommands:
         log.set_title.assert_called_once_with("t1", "Release notes")
 
     @pytest.mark.asyncio
+    async def test_title_reads_slack_markup_before_cutting(self, slack, sessions, owner):
+        log = MagicMock()
+        link = "<https://github.com/kirodotdev/KiroCrew/issues/21964|github.com/kirodotdev/KiroCrew/issues/21964>"
+        await _slash(f"!title {'x' * 50} {link}", slack, sessions, log=log)
+        titles = [a for a in slack.actions if a[0] == "set_thread_title"]
+        assert titles[0][1]["title"] == f"{'x' * 50} kirodotdev/KiroCrew#21964"
+        log.set_title.assert_called_once_with("t1", f"{'x' * 50} kirodotdev/KiroCrew#21964")
+
+    @pytest.mark.asyncio
     async def test_title_survives_log_failure(self, slack, sessions, owner):
         log = MagicMock()
         log.set_title.side_effect = OSError("nope")
@@ -1253,6 +1262,17 @@ class TestCompactCommand:
         sessions.has_session.return_value = has_session
         await h._handle_compact_command(slack, sessions, "C1", "t1", "msg1", "t1")
         assert expected in _texts(slack)
+
+    @pytest.mark.asyncio
+    async def test_flagged_session_says_the_account_changed(self, slack, sessions):
+        # The Kiro account check flagged the session without retiring it: try_acquire
+        # refuses it while has_session still answers True, and no reply is running.
+        sessions.try_acquire = AsyncMock(return_value=False)
+        sessions.has_session.return_value = True
+        sessions.is_retiring.return_value = True
+        await h._handle_compact_command(slack, sessions, "C1", "t1", "msg1", "t1")
+        assert _texts(slack) == mc.COMPACT_ACCOUNT_CHANGED_TEXT
+        sessions.release.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_acquired_but_no_provider(self, slack, sessions):

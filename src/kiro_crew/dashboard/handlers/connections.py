@@ -327,6 +327,8 @@ _mint_tasks: set[asyncio.Task] = set()
 # The same keepalive for the premint activation, kept separate so a page open cannot
 # be mistaken for a card-initiated mint when either set is inspected.
 _premint_tasks: set[asyncio.Task] = set()
+#: The ``grantSurviving`` label for a KAS saved sign-in a Disconnect could not remove.
+_KAS_SIGN_IN_LABEL = "kas_saved_sign_in"
 
 #: SEL read-id for the grant observation the premint endpoint acts on. Distinct from
 #: the mint engine's and the status module's ids so the trail says which surface
@@ -542,10 +544,10 @@ async def api_connections_mint(request: web.Request) -> web.Response:
     from kiro_crew.connections import crew_oauth
 
     if await asyncio.to_thread(crew_oauth.owns, slug):
-        # ``connections.crew_oauth``: the gateway runs the sign-in itself and keeps
+        # ``dashboard.feature_previews.crew_oauth``: the gateway runs the sign-in itself and keeps
         # the tokens in the vault; the card polls the same mint row as before. An
         # entry routing keeps native (its own credential header) mints natively.
-        token = await crew_oauth.start_mint_row(slug)
+        token = await crew_oauth.start_mint_row(slug, _open_project_dirs(request.app.get("state")))
         return web.json_response({"ok": True, "slug": slug, "state": "minting", "token": token})
 
     # Function-local by DESIGN, not for a cycle: this handlers package is imported
@@ -555,6 +557,12 @@ async def api_connections_mint(request: web.Request) -> web.Response:
     # test_the_handlers_package_does_not_import_the_mint_engine (and its warm twin)
     # enforce it in a subprocess -- hoisting either to module scope turns them red.
     from kiro_crew.connections.warm import adopt_shared_mint
+
+    if await asyncio.to_thread(_signs_in_on_kas, slug):
+        # A warm URL was minted by kiro-cli, whose grant a KAS chat never reads; the
+        # cold path signs in on the KAS engine instead (``connections.mint_kas``).
+        # The same rule the cold path applies, read after the card wrote the entry.
+        return await _start_cold_mint(slug, str(provider["mcp_url"]), f"provider:{slug}")
 
     # ADOPTION FIRST, because the alternative is throwing the answer away. The premint
     # sweep may already hold this provider's approval URL, and ``reserve_mint_row``
@@ -584,6 +592,17 @@ async def api_connections_mint(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "slug": slug, "state": "waiting", "token": adopted})
 
     return await _start_cold_mint(slug, str(provider["mcp_url"]), f"provider:{slug}")
+
+
+async def api_connections_oauth_callback(request: web.Request) -> web.Response:
+    """GET /api/connections/oauth/callback — a vendor's redirect to a DCR sign-in.
+
+    Served without a dashboard token (``token_auth_paths.CREW_OAUTH_CALLBACK_PATH``);
+    the pending ``state`` is the admission (``crew_oauth_dcr.gateway_callback``).
+    """
+    from kiro_crew.connections.crew_oauth_dcr import gateway_callback
+
+    return await gateway_callback(request)
 
 
 async def api_connections_mint_state(request: web.Request) -> web.Response:
@@ -718,6 +737,14 @@ async def api_connections_test(request: web.Request) -> web.Response:
             "crew_oauth_test_unsupported",
             slug=slug,
         )
+    if await asyncio.to_thread(_signs_in_on_kas, slug):
+        # The same for a Connect that signs in on the KAS engine: it saves the
+        # sign-in in Crew's grant vault and leaves kiro-cli no grant to test with.
+        return _conflict(
+            "Kiro Crew holds this sign-in; try the Connection from a chat instead",
+            "kas_sign_in_test_unsupported",
+            slug=slug,
+        )
 
     global _testing_slug
     async with _TEST_SLUG_GUARD:
@@ -800,6 +827,16 @@ def _routed_through_crew_oauth(slug: str) -> bool:
     return crew_oauth.configured_entry_routed(slug) is True
 
 
+def _signs_in_on_kas(slug: str) -> bool:
+    """Whether *slug*'s Connect signs in on the KAS engine (``connections.mint_kas``). Blocking.
+
+    Function-local import, for the boot-path reason the mint handlers give.
+    """
+    from kiro_crew.connections.mint_kas import kas_sign_in_entry
+
+    return kas_sign_in_entry(slug) is not None
+
+
 def _open_project_dirs(state: Any) -> tuple[Path, ...]:
     """Every project directory an open chat slot is bound to.
 
@@ -836,7 +873,8 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
     Body: ``{"slug": "<registry provider>"}``. Three local things: any in-flight
     mint is torn down, then -- in ONE locked transaction -- the MCP entry is
     removed from the scopes that configure this provider and the runtime's stored
-    grant artifacts are unlinked.
+    grant artifacts are unlinked. A sign-in saved for KAS chats in Crew's grant
+    vault is removed inside that transaction, unless another entry still reads it.
 
     Deleting the artifacts is the whole point of this endpoint. Removing the config
     entry alone leaves a usable refresh token on disk, so a later reconnect resumes
@@ -891,18 +929,22 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
     if await asyncio.to_thread(crew_oauth.manages, slug) or (
         await asyncio.to_thread(crew_oauth.holds_grant, slug) is True
     ):
-        # Crew holds one grant per provider and nothing else shares it, so
-        # Disconnect always revokes it upstream, deletes the vault entry and cuts
-        # every live bridge. The native-artifact census above governs only the
-        # runtime's own grant.
-        from kiro_crew.connections import crew_oauth_proxy
-
-        crew_oauth_proxy.drop_slug(slug)
+        # Crew holds one grant per provider. Disconnect revokes it upstream and
+        # deletes the vault entry; a Google card whose upstream grant another held
+        # Google card shares (same client) only deletes its entry. Live
+        # bridges stay registered: with no stored pair the proxy answers each call
+        # "reconnect it" (409) and sends nothing upstream, and a later Connect
+        # makes the same bridges work again. The native-artifact census above
+        # governs only the runtime's own grant.
         try:
             crew_result = await crew_oauth.disconnect(slug)
         except Exception as exc:  # noqa: BLE001 -- reported, never silently skipped
             logger.warning("Crew-held grant cleanup failed for %s (%s)", slug, type(exc).__name__)
             crew_result = {"removed": False, "revoked": False, "failed": True}
+            # The pair may still be stored: fail closed and cut every live bridge.
+            from kiro_crew.connections import crew_oauth_proxy
+
+            crew_oauth_proxy.drop_slug(slug)
     removed = scope.grant_removed
     # Asked rather than inferred from ``removed``: a survivor is what decides
     # whether this Disconnect actually held. Read outside the lock on purpose --
@@ -913,6 +955,12 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
         for label in await asyncio.to_thread(surviving_grant_artifacts, grant_url):
             if label not in surviving:
                 surviving.append(label)
+    # A Connect made while chats run on KAS saved its sign-in in Crew's grant
+    # vault, which the card reads beside kiro-cli's cache. Removed inside the lock
+    # by the same census (only the urls no surviving entry reads); reported here.
+    kas_removed = scope.kas_sign_ins_removed
+    if scope.kas_sign_ins_unproven and _KAS_SIGN_IN_LABEL not in surviving:
+        surviving.append(_KAS_SIGN_IN_LABEL)
 
     # A bare enqueue: SEL is warmed at gateway startup (sel.warm_sel_singleton).
     sel().log_api_access(
@@ -925,6 +973,7 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
         source="dashboard",
         resources=(
             f"provider:{slug} artifacts_removed={len(removed)} "
+            f"kas_sign_ins_removed={kas_removed} "
             f"surviving={len(surviving)} entry_removed={scope.entry_removed} "
             f"grant_shared={len(scope.grant_shared_with)} "
             f"census_incomplete={scope.census_incomplete}"
@@ -935,16 +984,13 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
         # live upstream, so the card must show a failure, not a disconnect.
         return web.json_response(
             {
-                "error": (
-                    "Kiro Crew could not remove its stored GitHub sign-in. " "Try Disconnect again."
-                ),
+                "error": "Kiro Crew could not remove its stored sign-in. Try Disconnect again.",
                 "code": "crew_cleanup_failed",
                 "slug": slug,
                 "entryRemoved": scope.entry_removed,
             },
             status=502,
         )
-    # Option B: Crew's grant is always revoked, never "kept for a sharer".
     crew_held = crew_result is not None and bool(crew_result.get("removed"))
     # The native census is hidden only while Crew owns this Connection, as on the
     # card; a pair left over from a flag now off says nothing about the native grant.
@@ -952,7 +998,7 @@ async def api_connections_disconnect(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "ok": True,
-            "grantRemoved": bool(removed) or crew_held,
+            "grantRemoved": bool(removed) or crew_held or kas_removed > 0,
             "grantSurviving": surviving,
             "entryRemoved": scope.entry_removed,
             "grantSharedWith": [] if crew_custody else list(scope.grant_shared_with),
@@ -1008,6 +1054,13 @@ async def api_connections_premint(request: web.Request) -> web.Response:
     # unbounded. warm_runtime's table_flow and rearms route the same call through a thread for
     # this reason, pinned by test/test_connections_warm_off_loop.py.
     candidates, audit_recorded = await asyncio.to_thread(_audited_mintable_providers)
+    if candidates:
+        from kiro_crew.connections.mint_kas import kiro_cli_sign_in_providers
+
+        # A provider whose Connect signs in on the KAS engine is never adopted from
+        # the warm table (see api_connections_mint), so warming it would only spawn
+        # a kiro-cli process for a URL nobody can use.
+        candidates = await asyncio.to_thread(kiro_cli_sign_in_providers, candidates)
     slugs = [str(provider["slug"]) for provider in candidates]
     if not slugs:
         # Nothing to warm: an activation with an empty claim set would spawn a

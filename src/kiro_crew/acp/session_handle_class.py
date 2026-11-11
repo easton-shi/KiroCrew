@@ -28,7 +28,7 @@ from kiro_crew.acp import session_handle_steering as _sh_steering
 from kiro_crew.acp import session_handle_turn as _sh_turn
 from kiro_crew.acp import session_handle_updates as _sh_updates
 from kiro_crew.acp import session_handle_watchdog as _sh_watchdog
-from kiro_crew.acp._dispatch import MAX_ACTIVE_TOOL_CALLS
+from kiro_crew.acp._dispatch import MAX_ACTIVE_TOOL_CALLS, NativeCompactionStates
 from kiro_crew.acp.elicitation import ElicitationRequest
 from kiro_crew.acp.engine_fallback import EngineFallbackTracker
 from kiro_crew.acp.liveness import (
@@ -56,6 +56,7 @@ from kiro_crew.acp.types import (
     steering_advertised,
 )
 from kiro_crew.recovery.ladder import InfraError
+from kiro_crew.security import StreamRedactor
 
 #: The owner modules whose functions ``AcpSessionHandle`` binds as its members, this
 #: shell included.
@@ -120,6 +121,7 @@ class AcpSessionHandle:
     mcp_session_report = _sh_mcp.mcp_session_report
     wait_mcp_ready = _sh_mcp.wait_mcp_ready
     wait_for_declared_mcp = _sh_mcp.wait_for_declared_mcp
+    wait_mounted_mcp = _sh_mcp.wait_mounted_mcp
     _note_mcp_sign_in_status = _sh_mcp._note_mcp_sign_in_status
     _offer_mcp_sign_in = _sh_mcp._offer_mcp_sign_in
     want_mcp_sign_in_named = _sh_mcp.want_mcp_sign_in_named
@@ -145,6 +147,13 @@ class AcpSessionHandle:
     _handle_kas_subagent = _sh_children._handle_kas_subagent
     _handle_kas_subagent_chunk = _sh_children._handle_kas_subagent_chunk
     _build_child_tool_activity_prefix = _sh_children._build_child_tool_activity_prefix
+    _handle_announced_subagent = _sh_children._handle_announced_subagent
+    _handle_legacy_codex_subagent = _sh_children._handle_legacy_codex_subagent
+    _announced_row = _sh_children._announced_row
+    _roster_event = _sh_children._roster_event
+    _child_text_activity = _sh_children._child_text_activity
+    _flush_announced_child_text = _sh_children._flush_announced_child_text
+    flush_native_child_text = _sh_children.flush_native_child_text
     _note_native_child = _sh_children._note_native_child
     _note_native_roster = _sh_children._note_native_roster
     native_child_resume_refusal = _sh_children.native_child_resume_refusal
@@ -217,6 +226,7 @@ class AcpSessionHandle:
     _refuse_unidentifiable_mcp_approval = _sh_permissions._refuse_unidentifiable_mcp_approval
     _refuse_unreadable_mcp_identity = _sh_permissions._refuse_unreadable_mcp_identity
     _refuse_unretained_provenance = _sh_permissions._refuse_unretained_provenance
+    _reject_with_host_notice = _sh_permissions._reject_with_host_notice
     _audit_handle_reject = _sh_permissions._audit_handle_reject
     apply_session_permission_routing = _sh_permissions.apply_session_permission_routing
     _build_permission_event = _sh_permissions._build_permission_event
@@ -362,6 +372,8 @@ class AcpSessionHandle:
         self._mcp_launches: dict[str, tuple[tuple[str, ...], ...]] = {}
         self._oracle = LivenessOracle(
             sample_min_secs=self._watchdog.wellness_sample_secs,
+            cleanup_tenancy=lambda: self._runtime.session_tenancy(self._session_id),
+            sandbox_wrapped_by_crew=lambda: self._runtime.sandbox_wrapped_by_crew,
             server_launches=self._remote_flat_launches,
             attribution_launches=self._mcp_attribution_launches,
         )
@@ -388,7 +400,7 @@ class AcpSessionHandle:
         self._tool_tracker = InFlightToolTracker(max_calls=MAX_ACTIVE_TOOL_CALLS)
         # The current parallel tool batch, for the opt-in batch write guard
         # that ``approve_tool`` consults (``acp.batch_guard``).
-        self._batch_window = batch_guard.BatchWindow()
+        self._batch_window = batch_guard.BatchWindow(gated=True)
         # toolCallIds that streamed output (a non-final tool_call_update with
         # content) this turn. A command that already produced output may have
         # already acted, so a non-interactive retry of it is never ``safe_retry``.
@@ -429,6 +441,9 @@ class AcpSessionHandle:
         # never resolves, so the ``session/prompt`` request goes unanswered, which
         # leaves this armed for ``_settle_codex_compaction`` at the turn's terminal.
         self._codex_compaction_pending: bool | str = False
+        # Native ``compaction_update`` lifecycle per id: duplicate terminals and
+        # late starts are dropped against it. Lives as long as the handle.
+        self._native_compaction_states = NativeCompactionStates()
         self._cancelled = False
         # Unresponsive-cancel tracking (mirrors AcpClient._cancel_ts /
         # _cancel_grace_secs). Set by cancel(); the dispatch loop uses them to
@@ -696,6 +711,10 @@ class AcpSessionHandle:
         # their permission requests itself, after the deny floor, the
         # sensitive-path check and the governance ceiling. Empty with no batch.
         self.kas_crew_answered: frozenset[str] = frozenset()
+        # The ``@server/tool`` grants a PreToolUse hook kept at ``ask``
+        # (``kas_hook_coverage.projected_hook_held``): answered the same way, but
+        # only on a surface that fires the hooks. Empty with no batch.
+        self.kas_hook_held: frozenset[str] = frozenset()
         # The agent's `toolsSettings.shell.allowedCommands` as the gate matches
         # them (``kas_permissions.crew_answered_commands``), answered the same way.
         self.kas_crew_answered_commands: tuple[str, ...] = ()
@@ -708,6 +727,16 @@ class AcpSessionHandle:
         # session's directory (``kas_agents.projected_write_allowlist``); None when
         # it does not. The gate refuses every other file write.
         self.kas_spec_write_allowlist: tuple[str, ...] | None = None
+        self.kas_spec_denies: Any = None
+        # Whether that shell allowlist lets a read-only command past, as kiro-cli
+        # does for `autoAllowReadonly: true` (``kas_agents.projected_shell_readonly``).
+        self.kas_spec_shell_readonly: bool = False
+        # The agent's write `allowedPaths`, anchored at this session's directory
+        # (``kas_write_allowlist.projected_answered_paths``): the gate answers a
+        # write every target of which one covers, after its checks.
+        self.kas_crew_answered_paths: tuple[str, ...] = ()
+        # The same for the read tool's `allowedPaths` (a covered read).
+        self.kas_crew_answered_read_paths: tuple[str, ...] = ()
         # The agent this session runs: the one the batch was registered for, then
         # whichever a KAS mode switch moves it to ("" with no batch). A turn that
         # names no agent runs this one, so its spec hooks are this agent's.
@@ -729,6 +758,9 @@ class AcpSessionHandle:
         # part of their env or headers, by key name only
         # (``kas_agents.withheld_credentials_notice``); "" otherwise.
         self.kas_withheld_credentials_notice: str = ""
+        # The telemetry notice for this session (``kas_cli_settings.session_telemetry_notice``);
+        # "" otherwise.
+        self.kas_telemetry_notice: str = ""
         # JSON-RPC request id -> {"once","always","reject"} optionId map, so
         # approve_tool / reject_tool echo the exact ids the agent advertised
         # (kiro "allow_once"/"allow_always"; claude-agent-acp "allow"/"reject").
@@ -775,6 +807,11 @@ class AcpSessionHandle:
         # The bare model a pair pin landed as when its effort was refused
         # (mirrors AcpClient.model_pin_partial).
         self.model_pin_partial: str = ""
+        # The model ``set_model(..., inherit=True)`` applied from kiro-cli's
+        # ``chat.defaultModel``, or ``""``. Not a pin: ``_model`` stays unpinned,
+        # so effort binding and fallback promotion read the session as unpinned,
+        # and a handle swap re-applies it the same way. Any other set_model clears it.
+        self.inherited_model: str = ""
         self._config_options: list[dict[str, Any]] = []
         self._available_models: list[dict[str, str]] = []
         # Set by ``_feed_advertised_model_cache`` when the capture changed the
@@ -783,11 +820,14 @@ class AcpSessionHandle:
         # ``AcpClient._advertised_models_changed`` on the direct-spawn path.
         self._advertised_models_changed: bool = False
         # Read by KAS only: the listed id a session born on an unlisted ``auto`` moves to,
-        # or "". One answer read from the ``model`` select, never the list itself:
-        # nobody has shown that list to be the account's complete served set, so
-        # it must not become the entitlement list the picker and the explicit-pick
-        # guard narrow by.
+        # or "". One answer read from the ``model`` select, never the list itself.
         self._kas_auto_fallback: str = ""
+        # Read by KAS only: the ids the ``model`` select listed, for ONE question in
+        # ``set_model``: is the pin about to be sent one the account is served? It
+        # never becomes ``_available_models`` (the picker's list). A live capture
+        # matched kiro-cli v2's ``models`` block id for id, and the one catalog model
+        # it left out failed the turn with ``InvalidModelError``.
+        self._kas_served_ids: list[str] = []
         # Read-path revalidation bookkeeping (see maybe_refresh_available_models).
         # The session-init snapshot is one unconfirmed answer captured at one
         # instant, and the read path (the dashboard picker filter) has no
@@ -821,6 +861,15 @@ class AcpSessionHandle:
         # KAS sub-agent roster keyed by agentSubtaskId. Each entry is shaped for
         # EVENT_SUBAGENT_LIST consumption by _native_subagent_sync in chat_runner.
         self._kas_subagent_roster: dict[str, dict[str, Any]] = {}
+        # Native children announced by lifecycle session/updates (codex-acp),
+        # keyed by the child's session id, same row shape as the KAS roster.
+        self._announced_subagent_roster: dict[str, dict[str, Any]] = {}
+        # toolCallIds of codex's legacy "Start/Complete subagent" rows this turn,
+        # so their trailing tool_call_update is dropped with the row it updates.
+        self._legacy_subagent_tool_ids: set[str] = set()
+        # One StreamRedactor per announced child whose text is streaming, keyed
+        # by the child's session id (_child_text_activity).
+        self._native_child_redactors: dict[str, StreamRedactor] = {}
 
     @property
     def session_id(self) -> str:

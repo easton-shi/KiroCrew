@@ -108,6 +108,7 @@ import { resolveDefaultMemoryMode } from '../api/queryClient'
 import { MAX_MESSAGE_FONT_SIZE } from '../pages/chat/ChatSettings'
 import { DURABLE_PREF_KEYS } from '../lib/uiPrefs'
 import { useSettingHighlight } from '../hooks/useSettingHighlight'
+import { PREVIEW_CREW_MODE, setPreviewFlag } from '../utils/previewFlags'
 
 import { Provider } from 'react-redux'
 import { MemoryRouter } from 'react-router-dom'
@@ -484,6 +485,22 @@ describe('ChatPanel — Messages', () => {
     await waitFor(() => expect(localStorage.getItem('mc-chat-copy-on-select')).toBe('0'))
   })
 
+  it('stores one-click follow-up send under its own device-only key, off by default and never backed up', async () => {
+    wrap('composer')
+    const sw = await screen.findByRole('switch', { name: 'Send follow-ups with one click' })
+    expect(sw).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(sw)
+    await waitFor(() => expect(localStorage.getItem('mc-followup-start-sends')).toBe('1'))
+    expect(sw).toHaveAttribute('aria-checked', 'true')
+    expect(JSON.parse(localStorage.getItem('mc-chat-config') || '{}')).not.toHaveProperty('followupStartSends')
+    // The uiPrefs host backup lives in the agent-writable data home, so a
+    // restorable value would let an agent turn on one-click running of its own
+    // prompts in the person's next fresh browser.
+    expect(DURABLE_PREF_KEYS).not.toContain('mc-followup-start-sends')
+    fireEvent.click(sw)
+    await waitFor(() => expect(localStorage.getItem('mc-followup-start-sends')).toBe('0'))
+  })
+
   it('inverts the stored collapse flag behind Show Thinking Inline', async () => {
     wrap()
     // The row shows the INVERSE of collapseAllSteps, so turning it on must
@@ -534,6 +551,25 @@ describe('ChatPanel — Messages', () => {
     fireEvent.click(sw)
     await waitFor(() =>
       expect(updateDashboardConfigMock).toHaveBeenCalledWith({ [key]: true })
+    )
+  })
+
+  it('offers Start New Chats in Ultra Mode only with the Ultra Mode preview on, and persists it', async () => {
+    const label = 'Start New Chats in Ultra Mode'
+    const view = wrap('sessions')
+    await settledSwitch('Restore Sessions')
+    expect(screen.queryByRole('switch', { name: label })).not.toBeInTheDocument()
+    view.unmount()
+    setPreviewFlag(PREVIEW_CREW_MODE, true)
+    wrap('sessions')
+    const sw = await settledSwitch(label)
+    expect(sw).toHaveAttribute('aria-checked', 'false')
+    // What Ultra Mode does is on the row itself, not only behind the "i" tooltip.
+    const row = document.querySelector('[data-setting-key="dashboard.new_chat_crew_mode"]') as HTMLElement
+    expect(within(row).getByText(/Ultra Mode runs each task in its own chat/)).toBeVisible()
+    fireEvent.click(sw)
+    await waitFor(() =>
+      expect(updateDashboardConfigMock).toHaveBeenCalledWith({ new_chat_crew_mode: true })
     )
   })
 

@@ -11,7 +11,7 @@ The emitter is three parts, and the line between them is where new work goes:
 | Module | Owns | New work that belongs there |
 |---|---|---|
 | `crew_log/emit.py` and its `crew_log/emit_*.py` owners | every `on_*` entry point and what each fact records; the open-handle cache that is the writer's `open_unit` adapter; the child-origin pins; the supersede repair, and the settlement of a job the writer rejected at its ceiling; `reset_caches`, `flush`, `drain_for_shutdown`, `live_turn` and the loss counters as the public surface | a new lifecycle fact, field or emitter, in the owner the table below names |
-| `crew_log/writer.py` | `CrewLogWriter`: the per-unit buffer and its order, retention and backoff, the refusal rule, the memory ceilings, the `write/dropped` loss marker, the inline path, stall reporting and the shutdown drain, all paced by one frozen `WriterLimits`; `WriteJob`, whose named constructors (`append`, `opening`, `follow_on`) select a row of the writer's policy table; and `WarningBudget`, the one rate-limited failure report the writer and the emitter share | how an append reaches the file |
+| `crew_log/writer.py` | `CrewLogWriter`: the per-unit buffer and its order, retention and backoff, the refusal rule, the memory ceilings, the `write/dropped` loss marker, the inline path, stall reporting and the shutdown drain, all paced by one frozen `WriterLimits`; `WriteJob`, whose named constructors (`append`, `opening`, `follow_on`) select a row of the writer's policy table; the writer lanes that drain different units side by side, one unit per lane at a time; and `WarningBudget`, the one rate-limited failure report the writer and the emitter share, defined in `crew_log/writer_warnings.py` and re-exported here | how an append reaches the file |
 | `crew_log/turn_tracker.py` | `TurnTracker`: each live turn's record (its step and call ordinals, whether its closer is owed), the settle-once tool registry, the attempt counts, the supersede repair's debt, and the never-evict-a-live-turn rule the emitter's own caches are trimmed by | per-turn bookkeeping |
 
 `crew_log/emit.py` is the emitter's import path and patch surface: a `kiro_crew._facade_mirror`
@@ -39,7 +39,7 @@ Both collaborators are built on first use and never at import, for the boot-path
 under "Storage runs off the event loop"; `reset_caches()` retires both -- the writer through
 `CrewLogWriter.close`, which waits a bounded moment and then discards what it could not
 write -- so the next use builds fresh ones, with test `WriterLimits` when the reset is given
-them. The writer's two seams each have two adapters: its executor is the one-worker
+them. The writer's two seams each have two adapters: its executor is the one-worker-per-lane
 crew-log pool in production and none in a test, where every pass runs on the caller's
 thread paced by an injected clock; its `open_unit` is the emitter's handle cache in
 production and a fault-injecting opener over a real temporary data home in a test.
@@ -243,10 +243,11 @@ unset here -- see "Reconnect is not resume" below for what it is for.
 | `message/queued` | `chat_delivery.queue_for_next_turn` | source, bytes, queue id -- no turn |
 | `approval/requested` | `_on_permission_prompt` (`chat_turn/permission_prompt.py`), one statement before the try whose `finally` records the decision | turn, request id, tool name and the redacted title the human is shown, each omitted when the frame named neither |
 | `approval/decided` | the same prompt's `finally`, where every exit converges | turn, request id, decision, `by: host` and the host's `cause` for an auto-decline |
-| `approval/requested` / `approval/decided` (subagent spawn gate) | `_spawn_with_approval_impl` in `subagent_manager/admission/pump.py`, when a spawn needs approval, through the writer in `subagent_manager/admission/gate_reporting.py`; decided in a `finally`, including a host-attributed cancel | in the PARENT's log under the turn that asked (`dispatch_origin`): approval id `spawn:<agent_id>`, tool `spawn_run` |
+| `approval/bridged` | `notifications/bridge_action_audit.audit_action`, for each action a chat app takes on a bridged approval (no transport calls it yet) | turn when known, request id, transport, the outcome in the RFC's words (`approved`, `denied`, `expired`, `refused`) with the `ActionOutcome` value as `reason` when not admitted, source channel, the acting identity and the bound owner when known |
+| `approval/requested` / `approval/decided` (subagent spawn gate) | `_spawn_with_approval_impl` in `subagent_manager/admission/pump.py`, when a spawn needs approval, through the writer in `subagent_manager/admission/gate_reporting.py`; decided in a `finally`, including a host-attributed cancel | in the PARENT's log under the turn that asked (`dispatch_origin`): approval id `spawn:<agent_id>`, tool `spawn_run`; `by: host` (and its `cause`) when the callback answered with nobody asked, by returning a `HostSpawnDecision` |
 | `approval/requested` / `approval/decided` (a running child's tool prompt) | `subagent_manager/run.py`, when a child asks for a tool | in the PARENT's log under the turn that asked (`child_origin`): approval id `<child_id>:<request_id>` |
 | `plan/updated` | `EVENT_TODO_UPDATE`, inside `slot.set_todo`'s own change gate | turn, the whole task list as `{id, text, state}` |
-| `background/completed` | `run_bg_oneliner` and `background_turn`, at the point they record usage, against an owner pinned BEFORE the call | kind, served model, provider, the billed token dimensions, credits, ms -- no turn |
+| `background/completed` | `run_bg_oneliner` and `background_turn`, at the point they record usage, against the slot's newest unit: the owner is pinned BEFORE the call, and when the slot moved to another unit during the call the entry goes to that newest unit (held in `pending-open` until its crew log exists) | kind, served model, provider, the billed token dimensions, credits, ms -- no turn |
 | `subagent/spawned` | `_log_spawned`, the one site every started run passes and no rejection does | the turn that ASKED and its attempt when observed, read from the pin taken at acceptance; child id, agent, model, the task text redacted and clipped, the three context-scope flags |
 | `subagent/steered` | `steer_run` after the provider accepted, `follow_up_run` after the queue accepted | child id, `interrupt` or `follow_up` |
 | `subagent/completed` | the exclusive terminal report, for outcome `completed` | child id, elapsed ms, credits when billed |
@@ -749,7 +750,11 @@ The drain runs on EVERY gateway mode, not only where a dashboard exists. The das
 registers a cleanup hook, but a mode that builds no dashboard app never runs one and the
 gateway's hard exit skips `atexit`, so the drain also sits on the exit path itself --
 before the log queue is flushed, so its own warning about an incomplete drain still
-reaches the log. Calling it twice is a no-op.
+reaches the log. Calling it twice is a no-op. aiohttp stops at the first cleanup hook that
+raises, so every gateway cleanup step registered ahead of the drain (the Kiro services, the
+speech and decision models, the config watcher, the remote puller, the instance tunnels)
+logs its own failure instead of raising
+(`test_a_raising_cleanup_step_does_not_skip_the_crew_log_drain`).
 
 ## A step is one model call; a call index orders the tools
 
@@ -1109,26 +1114,53 @@ would put someone else's cost in a user's log. Four kinds are emitted today: `ti
 `background/completed` names no turn. The call runs after a turn ends, on a separate session, and
 naming the turn that happened to be last would attribute the cost to work that did not cause it.
 
-The OWNER is resolved before the call, not in the teardown that writes the entry, and the reason is
-the resolver's own contract: it answers which unit a slot's work is landing in *now*. A slot can be
-reset, switched or compacted while a model call is in flight, and the successor cold-starts a new ACP
-session id -- so a teardown-time lookup would hand this call's spend to a session that never incurred
-it, silently, in a file nothing rewrites. Reading it up front pins the unit that was current when the
-work was ordered. This is the general rule for every future emit site too: the resolver answers a
-question about the present, so anything that outlives the moment it was asked must carry the answer
-rather than ask again.
+The OWNER is pinned before the call, and the entry is written to the slot's NEWEST unit. When the
+call ends, the background helper resolves the slot's session key again. If the slot still points at
+the pinned unit, or the key no longer resolves, the entry goes to the pinned unit. If a reset, switch
+or compaction moved the slot to another unit while the call ran, the entry goes to that newest unit.
 
-**What this misses, and why the alternative is worse.** A background call charged to a session whose
-ACP session is already GONE -- idle-expired, reset, or a consolidation scheduled long after the tab
-closed -- resolves to no unit, so its spend reaches the usage store and never reaches the log. The
-crew log FILE still exists on disk; what is missing is any live thing that names its id, and finding
-one would take a persisted key-to-id index this change deliberately does not add.
+The reason is that a crew log is append-only and a unit the slot has moved past must not grow.
+Growing the older unit retires the slot's savepoints beside the newest one, and a restart would then
+read that older unit again. So a call that ends after a reset counts in the
+successor unit's `usage`. The slot total is unchanged, because the slot's spend rows key by slot, not
+by unit. The successor session's root card shows that one call's credits, since the card folds only
+the current unit. Crediting it back to the older unit would need a cross-unit read on the card.
 
-Resolving later does not fix it and makes something worse. Later is strictly no more likely to find a
-live session, and in the one interleaving where it finds one that an earlier read would have missed --
-the owner starting a fresh session WHILE this call runs -- that session was created after the work was
-ordered, so the entry would name a unit that did not incur the cost. An omission a reader can see is
-the smaller failure than a confident misattribution it cannot.
+**The newest unit may have no crew log yet.** After a reset the successor's crew log is created by
+its first turn, which alone knows the header and the link back to the older unit. Until then the
+entry waits in an owner-only file, `crew-log/pending-open/<unit>.jsonl`, written on the crew-log
+writer thread. The writer thread checks whether the log exists; the caller only queues the job. Each
+held record is one binary `os.write` on an owner-only append file, and a failed or short write cuts
+the file back to its earlier size, so a torn line never survives into the next write.
+
+Every successful opening append drains the file into the new unit, right after that append, in
+order, whether or not that open created the header. Before the first record is appended, the drain
+writes a `.draining` marker that records where the log ended. The marker is written atomically: a
+temp file, length-checked and fsynced, then renamed into place, so a failed marker write leaves no
+marker. A drain cut short by a crash leaves both files, and the next drain reads the log from the
+marker's position and skips the records already appended, so the spend counts once. The held file
+is removed first and the marker after it, only once the whole drain has landed. The skip counts
+only the unbroken run of matching entries right after the marker, and stops at the first one that
+differs.
+
+Every `background/completed` write, with or without a reset, goes through the same writer job. When
+a held file exists for the unit, the job replays it first; a failed replay raises, so the writer
+retries the whole job and the new entry never lands ahead of a held one. Two calls with identical
+payloads are therefore both counted.
+
+A unit holds at most `PER_UNIT_LIMIT` (32) records. Past that the entry is dropped, counted in
+`dropped_writes`, and one WARNING is logged per unit. A record too large for the crew log's line
+ceiling is dropped the same way, both when it is held and when a held file is drained, so it never
+blocks later writes. The pending directory is fsynced after the held file is written, after the
+marker is renamed into place, and after the drain removes both files. The crew-log retention sweep removes the held
+files and markers of units it retires, and any held file older than its cutoff, so a unit that never
+opens does not keep its file forever.
+
+**What this misses.** A background call charged to a session whose ACP session is already GONE --
+idle-expired, reset, or a consolidation scheduled long after the tab closed -- resolves to no unit,
+so its spend reaches the usage store and never reaches the log. The crew log FILE still exists on
+disk; what is missing is any live thing that names its id, and finding one would take a persisted
+key-to-id index this change does not add.
 
 ### The plan records two states because the stream carries two
 
@@ -1364,8 +1396,10 @@ latency preference.
 
 So an entry point does only what must be measured where it is called, builds the storage
 call as a `WriteJob`, and submits it to the installed `CrewLogWriter`, whose executor is
-`executors.crew_log_executor()` -- a pool of exactly ONE worker, because the order entries
-reach a unit's file is part of the format. The call sites stay synchronous
+`executors.crew_log_executor()` -- one worker per writer lane (`WriterLimits.lanes`, 4).
+The order entries reach a unit's file is part of the format, so a lane HOLDS a unit while
+it writes it and no other lane or inline write touches a held unit: each unit still has one
+writer. The call sites stay synchronous
 and gain no suspension point; in particular `_compaction_gate_decision` and
 `_settle_compact_cooldown` are synchronous methods called from async code, which an
 `await`-based emitter could not have served without changing their signatures.
@@ -1429,8 +1463,8 @@ is what bounds this at one extra attempt: the order the first submission was wai
 since nothing ahead of it will be written now, and a hook that re-armed itself would follow a wedged
 disk around its retry budget for as long as the disk stayed wedged. The drop counted this job as one
 missing append before the hook ran, and it is not missing, so the count is taken back out before any
-marker is authored -- a marker is written by a LATER pass of the one writer thread, so no reader can
-have seen the count. Only the count moves: a job re-submitted this way carries no body, so the
+marker is authored -- a marker is written by a LATER pass over that unit, and the lane that dropped
+the batch still holds the unit while it takes the count back, so no reader can have seen it. Only the count moves: a job re-submitted this way carries no body, so the
 marker's byte total was already exact. Debt that falls to nothing is removed rather than left at
 zero, so a session whose only dropped entry is coming back appends no marker announcing that nothing
 is missing.
@@ -1543,22 +1577,35 @@ the disk, which is the thing this path exists to prevent.
 The buffer is keyed per session, because each session is a separate file and one slow crew log
 must not reorder another's entries.
 
-What bucketing does NOT buy is latency isolation, and the distinction matters enough to state:
-ONE worker drains every session, so a write that hangs holds up every other session's entries
-until it clears or its batch is given up on. Order and content survive -- a held session's
-entries stay in its own bucket, in order, and land when the wedge clears -- but a reader
-watching a healthy session sees nothing arrive while an unrelated one is stuck. A worker per
-session would trade that for concurrent appends to one file from several threads, which
-`flock` serializes without ordering, so the cure would cost the seq-follows-causality property
-this log is for. The backlog behind a hang is bounded by the hard count and byte ceilings; the
-in-flight storage call itself has no retry bound until it returns.
+**Lanes give latency isolation up to their count.** Up to `WriterLimits.lanes` drain loops
+share the buffer. A pass claims one session at a time and HOLDS it until its batch is
+written, retained or dropped; a held session is claimed by no other lane and written inline
+by no caller, so concurrent appends to one file from several threads never happen -- `flock`
+would serialize them without ordering, which would cost the seq-follows-causality property
+this log is for. So a write that hangs or crawls holds one lane and its own session, and the
+other lanes keep draining every other session. The units of ONE slot are held together
+(`crew_log/writer_groups.py`, keyed by the slot the unit's header records): a work entry's
+append and its publish to the slot's `work-unit-order` file are two steps, and the `work`
+and `workstreams` folds read that file as "which unit holds the newest record", so two units
+of one slot on two lanes could publish in the reverse of their append order. The key is
+noted when a unit's opening entry is handed over and when the board relay resolves a
+target (on the relay's own thread, `crew_log/work_relay_feed.py`), never read under the
+writer's lock; a unit with no key is held alone. A lane stops when every owed session is held
+by another lane; that lane looks again after it lets its session go. A producer starts
+another lane while fewer than `lanes` run and more sessions are owed or held than lanes run.
+More lanes than `lanes` stuck at once is the old single-worker behaviour again: the rest
+wait. In the #31502 PR 2 bench (20 sessions at 5 Hz, one session's fsync slowed to 500 ms,
+no busy threads) the other sessions' append p50 went from 574 ms on one worker to 12 ms,
+and p99 from 1060 ms to 25 ms. The backlog behind a hang is bounded by the hard count and byte ceilings;
+the in-flight storage call itself has no retry bound until it returns.
 
 **A write that HANGS is the one failure no attempt counter bounds.** A call that
-never returns cannot advance `max_write_attempts`, and the single writer cannot
-drain another session meanwhile. Producers continue until the hard count or byte
-ceiling is reached; later tail entries are then refused and counted as overflow.
-The memory backlog is bounded, but the in-flight filesystem call itself cannot be
-cancelled safely from this thread.
+never returns cannot advance `max_write_attempts`, and its lane cannot drain another
+session meanwhile. Producers continue until the hard count or byte ceiling is reached;
+later tail entries are then refused and counted as overflow. The memory backlog is
+bounded, but the in-flight filesystem call itself cannot be cancelled safely from this
+thread. `CrewLogWriter.close` leaves a stuck lane's session held, so nothing writes beside
+that call when it returns.
 
 Visibility is therefore still required. A job past `WriterLimits.write_stall_secs` is reported
 once as a stall by a producer -- the thread that could report from the write is the
@@ -1566,7 +1613,7 @@ one blocked in it -- while `buffered_writes()`, `peak_buffered_writes()`, and th
 high-water warning expose the queued backlog. A stalled job may still land and has
 not spent a retry attempt until it returns.
 
-One worker drains it in batches. It pauses `WriterLimits.batch_deadline_seconds` before each pass, so a
+Each lane drains it in batches. It pauses `WriterLimits.batch_deadline_seconds` before each pass, so a
 turn's burst of entries becomes one pass rather than a wake per entry; the deadline is fixed
 rather than adaptive so the worst case a producer can impose on the file is a constant.
 A `flush()` waiter, a shutdown drain, and a bucket that already holds
@@ -1582,8 +1629,11 @@ carries a `GroupPart`, and a pass writes a session's consecutive run of them wit
 exists because on a loaded host every syscall of an append re-takes the GIL, so the writer
 thread paid the whole lock/stat/open/fsync sequence per entry (#31502). The contract an
 acknowledgement gives does not change: a member's post-append step (`on_settled`'s "wrote",
-the eager wake, the board relay) and its `after` run only once the whole run's `append_many`
-returned, so nothing is reported recorded before it is durable. A run fails, is retained
+the eager wake, the board relay's queue put) and its `after` run only once the whole run's
+`append_many` returned, so nothing is reported recorded before it is durable. Neither
+post-append step lists the store on the lane: the eager wake is one `put_nowait`, and the
+relay's newest-unit lookup runs on its own consumer thread, which hands the copies back
+as one follow-on per board unit (`crew-log-projection.md`). A run fails, is retained
 and is dropped as a whole, with the usual `write/dropped` marker. A run that is REFUSED
 (decided before any byte, e.g. one oversize or malformed entry) is retried one job at a
 time, so the bad entry stays the only casualty. A job without a part (a lifecycle record

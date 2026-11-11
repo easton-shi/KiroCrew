@@ -140,6 +140,7 @@ from kiro_crew.skills_auto_model import (  # noqa: F401
     _build_auto_skill_content,
     _emit_pending_consumed,
     _emit_pending_staged,
+    frontmatter_pinned,
     set_pending_consumed_hook,
     set_pending_staged_hook,
 )
@@ -435,6 +436,9 @@ class SkillsLoader:
         self._closed = False
         self._disabled_apps_cache: tuple[float, frozenset[str]] | None = None
         self._released_apps_cache: tuple[float, frozenset[str]] | None = None
+        #: ``(deadline, apps root as spelled, (resolved apps root, resolved builtins
+        #: root))``; see ``skill_runtime.catalog._owner_roots``.
+        self._owner_roots_cache: tuple[float, str, tuple[Path, Path]] | None = None
         #: ``id(catalog list) -> (that list, (disabled apps, released apps), visible
         #: rows)``; see ``skill_runtime.catalog._iter_visible``.
         self._visible_memo: dict[

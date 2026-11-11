@@ -92,6 +92,8 @@ PARTS: tuple[ModuleType, ...] = (
 FROZEN_NAMES: tuple[str, ...] = (
     "Any",
     "AppManifest",
+    "Awaitable",
+    "Callable",
     "DESKTOP_BUILD_STEP_UNSUPPORTED",
     "FIRST_PARTY_AUTHORS",
     "IPv6Address",
@@ -309,6 +311,7 @@ FROZEN_NAMES: tuple[str, ...] = (
     "list_catalog_apps",
     "list_installed_apps",
     "list_registry",
+    "loads_user_json",
     "logger",
     "logging",
     "minimal_env",

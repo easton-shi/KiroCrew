@@ -191,6 +191,11 @@ queue, a deployer, a published artifact -- has exactly one child that lands it.
 Testing and review are their own item, dispatched to a different child than the
 author: an author grading its own work reports the result it already believes.
 
+**Fix a routine incident yourself when it fits one turn.** goal-conductor's
+Patrol lists the routine incidents a conductor handles without its manager. A
+conductor dispatches the fix. You may do it in this turn when it passes the
+do-it-yourself test in section 3.
+
 ## 6. When another conductor dispatched you
 
 Everything above still holds, and `goal-conductor`'s "When a conductor dispatched
@@ -210,5 +215,6 @@ Two lead-only additions:
 - The ledger nests two levels by default. Width is where the parallelism lives,
   not depth; an operator who wants more levels sets `work_ledger.max_depth` and
   accepts that each level multiplies sessions.
-- `execute_bash` is never auto-approved, so each run of the evaluator costs one
-  approval. Batch every `done` item into ONE call, as `goal-conductor` directs.
+- Run the evaluator as the `accept_eval` tool; it does not prompt. `execute_bash` is never
+  auto-approved, so the shell fallback costs one approval per run. Batch every
+  `done` item into ONE call, as `goal-conductor` directs.

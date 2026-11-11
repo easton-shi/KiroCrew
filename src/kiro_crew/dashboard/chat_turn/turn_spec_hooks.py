@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import time
 from typing import TYPE_CHECKING, Any
 
 from kiro_crew.agent_files import is_kirocrew_default_agent
@@ -20,6 +19,7 @@ from kiro_crew.agent_sdk.spec_hooks import (
     observer_spec_hooks,
     overlong_spec_hook_commands,
     project_hook_files_present,
+    provider_session_key,
     session_agent,
     spec_hook_events,
     spec_hooks_run_nowhere,
@@ -30,6 +30,7 @@ from kiro_crew.agent_sdk.spec_hooks import (
     spec_tools_settings_unapplied,
     withheld_project_spec_hooks,
 )
+from kiro_crew.dashboard.agent_welcome import AGENT_WELCOME_KIND
 from kiro_crew.dashboard.chat_utils import (
     SPEC_HOOKS_NOTICE_KIND,
     RecoveryPayload,
@@ -37,6 +38,7 @@ from kiro_crew.dashboard.chat_utils import (
     mint_options_token,
     remember_slack_options,
 )
+from kiro_crew.dashboard.chat_utils_injected_rows import SPEC_HOOKS_RUN_NOWHERE_NOTICE
 from kiro_crew.dashboard.engine_fallback import hook_session_model
 from kiro_crew.dashboard.state import (
     DENY_CAUSE_POLICY,
@@ -76,8 +78,10 @@ if TYPE_CHECKING:
     )
     from kiro_crew.dashboard.chat_turn.deny_chokepoints import _redact_display_text
     from kiro_crew.dashboard.chat_turn.recipient import (
+        _cross_surface_images,
         _cross_surface_reply_text,
         _deliver_cross_surface_reply,
+        _local_file_name,
         _retire_mirror_thinking,
         cross_surface_withheld,
         slack_publication_withheld,
@@ -108,11 +112,14 @@ async def _surface_agent_welcome(
     """Render *agent*'s ``welcomeMessage`` into *slot*, at most once per activation.
 
     The one consumer of the agent-config field. An agent JSON may carry a
-    ``welcomeMessage`` — a usage hint its author wants the user to read when the
-    agent takes over — and this is the only place it reaches a user. Kiro Crew's
-    own bundled agents ship one, so the field is not a niche extension point.
+    ``welcomeMessage``, a usage hint its author wants the user to read when the
+    agent takes over, and this is the only place it reaches a transcript. Before
+    a chat's first message the welcome page shows it instead, from the slot
+    summary (``dashboard.agent_welcome``), since an unstarted chat holds no row.
+    Kiro Crew's own bundled agents ship one, so the field is not a niche
+    extension point.
 
-    Three properties are the whole design, and each one rules out an
+    Four properties are the whole design, and each one rules out an
     alternative that looks simpler:
 
     * **A transcript row, not prompt context.** Role ``notice``: durable (not in
@@ -124,6 +131,10 @@ async def _surface_agent_welcome(
       ``slot._welcomed_agent``, because a switch and the session start its own
       reset produces are two events for ONE activation, and each path would
       otherwise emit for the other.
+    * **Tagged, so it is never folded away.** ``meta.kind`` is
+      ``AGENT_WELCOME_KIND``, which the dashboard's turn fold exempts: the row
+      lands inside the turn that activated the agent, and under the default
+      collapse-all setting an untagged notice there folds with the working steps.
     * **Untrusted text.** The field is read from a user-writable, tool-shared
       directory. ``NoticeCard`` renders a ``notice`` row as plain text (no
       markdown, no HTML), the reader caps its length, and it is passed through
@@ -156,7 +167,14 @@ async def _surface_agent_welcome(
         return
     if not text:
         return
-    append_and_surface(state, slot, "notice", _redact_display_text(text), "msg msg-info")
+    append_and_surface(
+        state,
+        slot,
+        "notice",
+        _redact_display_text(text),
+        "msg msg-info",
+        meta={"kind": AGENT_WELCOME_KIND},
+    )
 
 
 async def _prepare_spec_hooks(
@@ -209,6 +227,9 @@ async def _prepare_spec_hooks(
         # session this turn holds, set at admission.
         held = getattr(slot, "_active_turn_session_key", "")
         by_session = {"session_key": held} if isinstance(held, str) and held else {}
+        # The app the provider runs under, as its KAS projection was handed it; a
+        # provider that carries none leaves the app unknown.
+        app = getattr(client, "owning_app", None)
         hooks, lost, unconfirmable = await asyncio.to_thread(
             functools.partial(
                 crew_fired_spec_hooks,
@@ -219,6 +240,9 @@ async def _prepare_spec_hooks(
                 # Only KAS drops a remote MCP server's `oauth` block, and only an
                 # engine that does not announce `mcpServerOAuth`.
                 discards_mcp_oauth=on_kas and not keeps_mcp_oauth(client),
+                # The session and app the KAS projection judged `trustedAgents` for.
+                governance_session_key=provider_session_key(client),
+                governance_app=app if isinstance(app, str) else None,
                 **by_session,
             )
         )
@@ -478,13 +502,18 @@ async def _notice_spec_hooks_run_nowhere(
         )
         return
     if events:
+        meta = {"kind": SPEC_HOOKS_NOTICE_KIND}
+        # A preToolUse hook is there to refuse calls, so the notice that it does
+        # not run gets no tag: the dashboard offers no Dismiss link on it.
+        if "preToolUse" not in events:
+            meta["spec_hooks_notice"] = SPEC_HOOKS_RUN_NOWHERE_NOTICE
         append_and_surface(
             state,
             slot,
             "notice",
             _redact_display_text(_spec_hooks_run_nowhere_notice(agent, events)),
             "msg msg-info",
-            meta={"kind": SPEC_HOOKS_NOTICE_KIND},
+            meta=meta,
         )
 
 
@@ -578,72 +607,23 @@ async def _notice_unread_steering(
         )
 
 
-async def _notice_inherited_conductor_skills(
-    state: "DashboardState", slot: "_ChatSlot", client: Any, agent: str
-) -> None:
-    """Tell a Bot chat's person, once per new session, that its conductor loads user skills.
-
-    Only while ``skill_scope.MATE_CONDUCTOR_INHERITS_USER_SKILLS`` is on and the
-    session's conductor scope really holds a skill from the user's ``~/.kiro/skills``
-    or the workspace ``.kiro/skills``. The crewmate chat draws messages only (the
-    "crewmate chat draws messages only" decision entry), so the guidance is queued
-    as this turn's pending context and the crewmate says it in its reply; the
-    ``notice`` row is for the Sessions page. Best-effort: an unreadable scope or a
-    full queue never fails the turn.
-    """
-    from kiro_crew.agent_discovery import mate_conductor_inherited_skills
-    from kiro_crew.mate_worker import MATE_CONDUCTOR_AGENT
-
-    if session_agent(client, agent) != MATE_CONDUCTOR_AGENT:
-        return
-    cwd = getattr(client, "cwd", "")
-    try:
-        names = await asyncio.to_thread(
-            mate_conductor_inherited_skills, cwd if isinstance(cwd, str) and cwd else None
-        )
-    except Exception:  # noqa: BLE001 - an informational row must never fail a turn
-        logger.debug("crewmate conductor inherited skills could not be read", exc_info=True)
-        return
-    if not names:
-        return
-    shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
-    text = (
-        f"This Bot's chat still loads your own skills ({shown}). After the next "
-        "release it loads only its built-in skills. To keep a skill, add it to this "
-        "Bot in its Abilities settings, or ask it here to add the skill."
-    )
-    append_and_surface(
-        state,
-        slot,
-        "notice",
-        _redact_display_text(f"ℹ {text}"),
-        "msg msg-info",
-    )
-    entry = {
-        "content": (
-            "Before your answer, tell the person this, in their language and "
-            f"in a short sentence or two: {text}"
-        ),
-        "source": "kirocrew",
-        "ephemeral": True,
-        "injectedAt": time.time(),
-    }
-    if not slot.append_pending_context(entry):
-        logger.debug("crewmate skill deprecation note was not queued: context is full")
-
-
 def _notice_steer_upgrade(state: "DashboardState", slot: "_ChatSlot", client: Any) -> None:
     """One notice row on a new session whose adapter is too old to take a mid-turn
     message, one whose KAS drops its agent's prompt, and one whose goose or codex is
     outside its tested range: the chat runs, and each row names the installed version, the
     tested one and the command that installs it. One more on a session whose MCP
     servers start without part of their env or headers, naming each server and the
-    key names it lost, never a value."""
+    key names it lost, never a value. One more on a KAS session told to turn telemetry
+    off, since Crew cannot confirm the engine applied it. One more on a claude session
+    that runs in Default instead of the Auto it asked for, naming the ways back."""
     for name in (
         "steer_upgrade_notice",
         "agent_prompt_upgrade_notice",
         "tested_version_notice",
         "withheld_credentials_notice",
+        "telemetry_unconfirmed_notice",
+        "kiro_cli_model_notice",
+        "mode_pinned_notice",
     ):
         notice = getattr(client, name, "")
         if isinstance(notice, str) and notice:
@@ -727,6 +707,11 @@ async def _surface_withheld_project_hooks(
             "msg msg-info",
             meta={"kind": SPEC_HOOKS_NOTICE_KIND},
         )
+
+
+def _on_kas(client) -> bool:
+    """Whether *client* runs on KAS."""
+    return capabilities_of(client).backend == ACP_BACKEND_KAS
 
 
 async def _fire(
@@ -1193,8 +1178,29 @@ async def _turn_stop_hook(turn: _ChatTurn) -> None:
             turn._mirror_thinking_ts = await _retire_mirror_thinking(
                 state.slack_client, _mirror_chan, turn._mirror_thinking_ts
             )
-            for _part in render_for_slack(_mirror_body):
-                await state.slack_client.post_message(_mirror_chan, _part, _mirror_post_ts)
+            # Local images, before any split, through the gates every mirror leg
+            # shares (``_cross_surface_images``) and Slack's own renderer budgets
+            # and upload step. A picture that is not sent is named, never pathed.
+            from kiro_crew.slack.files import UPLOAD_LIMITS as _slack_upload_limits
+            from kiro_crew.slack.files import upload_outbound_files as _slack_upload
+
+            _mirror_body, _mirror_files, _mirror_notes = await _cross_surface_images(
+                state, session_key, "slack", _mirror_body, _slack_upload_limits
+            )
+
+            async def _post_rendered(text: str) -> None:
+                for _part in render_for_slack(text):
+                    await state.slack_client.post_message(_mirror_chan, _part, _mirror_post_ts)
+
+            if _mirror_body or not _mirror_files:
+                await _post_rendered(_mirror_body)
+            if _mirror_files:
+                for _failed in await _slack_upload(
+                    state.slack_client, _mirror_chan, _mirror_post_ts or "", _mirror_files
+                ):
+                    _mirror_notes.append(f"⚠ Couldn't upload: {_local_file_name(_failed.dest)}")
+            if _mirror_notes:
+                await _post_rendered("\n".join(_mirror_notes))
             if _mirror_options:
                 # Keep the ts this posts: the control has to be spendable
                 # later, and discarding the ts is what leaves a superseded

@@ -1036,6 +1036,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         template_auto_approved_servers,
         undo_snapshot_changed,
         undo_survivors,
+        workflow_source_diff,
     )
     from kiro_crew.dashboard.change_cards_records import (  # noqa: F401
         _ALL_STATUSES,
@@ -1077,6 +1078,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _kirocrew_target,
         _ranked,
         _reaches,
+        _refuse_locked,
         _registry_by_config_key,
         _registry_entry,
         _row_hits,

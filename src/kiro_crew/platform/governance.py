@@ -41,6 +41,7 @@ import logging
 import sys as _sys
 from typing import (
     TYPE_CHECKING,
+    Callable,
     Container,
     Dict,
     Mapping,
@@ -296,9 +297,9 @@ def _ceiling_has_no_say(ref: str, ceiling: Optional[GovernanceCeiling]) -> bool:
     refuses a floor-gated builtin first) and the gate-answered grant
     (:func:`may_grant_builtin_at_gate`, whose call has already met the floor).
     """
-    # An enterprise build has no ungoverned host: an unnamed scope is answered by
+    # An LTS build has no ungoverned host: an unnamed scope is answered by
     # the built-in baseline, read through ``policy_level_control`` below.
-    if ceiling is None and not edition.is_enterprise():
+    if ceiling is None and not edition.is_lts():
         return True
     try:
         if ref.startswith("@"):
@@ -464,9 +465,12 @@ def strip_ungoverned_auto_approve(
 ) -> Dict[str, object]:
     """Return ``servers`` with a ceiling-governed ``autoApprove`` removed.
 
-    ``autoApprove`` is the OTHER route to the exemption ``allowedTools`` grants,
-    and a more direct one: kiro-cli approves an autoApproved MCP tool locally and
-    emits no permission request, so ``hooks.on_tool_call`` never runs for it.
+    ``autoApprove`` is the OTHER route to the exemption ``allowedTools`` grants:
+    neither runtime reads the key, so each verb kept here is granted as an
+    ``@<server>/<tool>`` entry where the session starts (the skill view's
+    ``allowedTools`` on kiro-cli, the projection's ``permissions`` on KAS), which the
+    runtime approves locally with no permission request, so ``hooks.on_tool_call``
+    never runs for it.
     ``agent.py``'s managed-server block states the rule for the servers KiroCrew
     ships ("DELIBERATELY NO autoApprove KEY, and none may ever be added"); this
     applies it to every other source.
@@ -680,7 +684,11 @@ def _config_files_state() -> tuple[bool, bool]:
     keeps every grant, Crew's own ``@kirocrew-*`` included.
     """
     try:
-        from kiro_crew.config.loader import config_local_path, config_path, read_config_text
+        from kiro_crew.config.loader import (
+            config_local_path,
+            config_path,
+            read_endorsed_config_text,
+        )
 
         paths = (config_path(), config_local_path())
     except Exception:  # noqa: BLE001 — a config read must not break a writer
@@ -689,9 +697,11 @@ def _config_files_state() -> tuple[bool, bool]:
     torn = names_key = False
     for path in paths:
         try:
-            if not path.exists():
-                continue
-            text = read_config_text(path)
+            # As the load reads it: where the sandbox seals these files, a deleted or
+            # tampered one is its endorsed copy, so the owner's key still counts.
+            text = read_endorsed_config_text(path)
+        except FileNotFoundError:
+            continue
         except Exception:  # noqa: BLE001 — bytes that cannot be read cannot show the key unset
             logger.debug("config file unreadable: %s", path, exc_info=True)
             return True, True
@@ -828,6 +838,36 @@ def may_skip_gate_now(ref: str) -> bool:
     names asks on every call, so no writer may grant it statically.
     """
     return _policy_may_skip_gate_now(ref) and not _operator_requires_confirmation(ref)
+
+
+def may_skip_gate_for_session(session_key: str, app: Optional[str]) -> Callable[[str], bool]:
+    """The :func:`may_skip_gate_now` predicate for a writer built for one session.
+
+    The KAS projection is built per session, so the profiles its predicate asks
+    about are the ones the gate could resolve for that session
+    (``governance_profiles.session_profiles_govern``), never every configured one:
+    a profile bound to another surface or another app does not withhold a grant
+    from this session. *app* is the session's governance app, or ``None`` when it
+    is not known, which counts every app-bound profile. The ceiling and
+    ``hooks.confirm_tools`` are asked as :func:`may_skip_gate_now` asks them, at
+    each call, and an error withholds.
+    """
+
+    def permits(ref: str) -> bool:
+        try:
+            from kiro_crew.platform.context import current_context
+            from kiro_crew.platform.governance_profiles import session_profiles_govern
+
+            if not may_skip_gate(ref, getattr(current_context(), "governance", None)):
+                return False
+            if session_profiles_govern(ref, session_key, app=app):
+                return False
+        except Exception:  # noqa: BLE001 - cannot tell -> withhold
+            logger.warning("cannot evaluate the session's governance for %r; withholding", ref)
+            return False
+        return not _operator_requires_confirmation(ref)
+
+    return permits
 
 
 def may_grant_builtin_at_gate(ref: str, ceiling: Optional[GovernanceCeiling]) -> bool:
@@ -1123,7 +1163,7 @@ __all__ = [
 #   ``tool_calls`` -- the governed (scope, item) pairs one tool call touches
 #   ``archetypes`` -- the decision record, the four archetypes and their composition
 #   ``catalog`` -- which scopes exist, and which archetype each one is
-#   ``baseline`` -- the enterprise built-in baseline: each scope's minimal set
+#   ``baseline`` -- the LTS built-in baseline: each scope's minimal set
 #   ``carriers`` -- ``GovernanceCeiling``, ``Profile`` and their policy-only blocks
 #   ``parsing`` -- a policy or profile document into its carrier
 #   ``signature`` -- proving a policy's ``identity.signature``
@@ -1172,9 +1212,9 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         BASELINE_CONTROLS,
         BASELINE_INNER_LISTS,
         BASELINE_UNGATED,
-        ENTERPRISE_SLACK_CHANNELS,
-        ENTERPRISE_UPDATE_CHANNEL,
-        ENTERPRISE_YOLO_MAX_SECONDS,
+        LTS_SLACK_CHANNELS,
+        LTS_UPDATE_CHANNEL,
+        LTS_YOLO_MAX_SECONDS,
     )
     from kiro_crew.platform.governance_parts.carriers import (  # noqa: F401
         _AGENTCORE_POLICY_ONLY,
@@ -1182,6 +1222,8 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _AGENTCORE_SCOPE,
         _POLICY_DISTRIBUTION_HEADERS_ENV,
         _POLICY_DISTRIBUTION_URL_ENV,
+        _TELEMETRY_OTLP_ENDPOINT,
+        _TELEMETRY_SCOPE,
         _UNAVAILABLE_DISPOSITIONS,
         DEFAULT_FETCH_TIMEOUT_SECS,
         MAX_DURATION_SECS,
@@ -1201,9 +1243,10 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _apply_agentcore_gateway_url,
         _apply_agentcore_posture,
         _apply_agentcore_workload_name,
+        _apply_telemetry_otlp_endpoint,
         _capability_raw_for_gate,
         _command_deny_patterns,
-        _is_enterprise,
+        _is_lts,
         _version_tuple,
         active_policy_distribution,
         active_update_pins,
@@ -1213,6 +1256,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         compose_profiles,
         deny_all_profile,
         registry_local_control_plane_permitted,
+        telemetry_otlp_endpoint,
     )
     from kiro_crew.platform.governance_parts.catalog import (  # noqa: F401
         _SCOPE_ALIASES,
@@ -1244,7 +1288,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _ORIGIN_ITEM_RE,
         _PLAIN_HOST_RE,
         _WINDOWS_PATHS,
-        ENTERPRISE_ORIGIN_ENTRY_RE,
+        LTS_ORIGIN_ENTRY_RE,
         _browser_idna,
         _browser_origin,
         _canonical_ip,
@@ -1273,7 +1317,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _SANDBOX_FLAGS_SCOPE,
         _SANDBOX_RESERVED_FLAGS,
         _STRUCTURAL_KEYS,
-        ALLOW_ONLY_IN_ENTERPRISE,
+        ALLOW_ONLY_IN_LTS,
         POLICY_VERSION,
         _browser_serialized_origin,
         _coerce_boot_flag,
@@ -1312,6 +1356,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         TIER_HOME,
         _audit_policy_tier,
         _audit_tier_intersect_once,
+        _compose_allow_terminal,
         _declared_distribution,
         _intersect_ceilings,
         _intersect_update_pins,
@@ -1327,8 +1372,8 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _warn_env_beneath_central_once,
         _warn_home_unreadable_beneath_authority_once,
         _with_baseline_controls,
-        _with_enterprise_baseline,
-        _with_enterprise_value_floors,
+        _with_lts_baseline,
+        _with_lts_value_floors,
         compose_installed_ceiling,
         compose_tier_ladder,
         last_composed_ceiling,
@@ -1361,6 +1406,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _cu_action_key,
         _governed_targets,
         _tool_arg_paths,
+        classify_image_reads,
         classify_tool_args,
         classify_tool_title,
         computer_use_action_classes,

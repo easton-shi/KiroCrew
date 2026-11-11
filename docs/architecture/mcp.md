@@ -89,16 +89,23 @@ kirocrew`). Onto that base:
    instead of losing to the value the first rebuild froze. Every other key on the
    entry is the user's and survives by omission, `autoApprove` included.
    Reconciling retires the name, so a lower-priority scope cannot reconcile it
-   again. `command`/`url` and `headers` are NOT reconciled — see the fallback's
-   as-a-unit rule below. `args` and `env` ARE, but only onto an entry whose
-   command names the same program the source declares (the discovery module's
-   `_commands_diverged`, which reads the entry's resolved `/…/bin/npx` as the
-   source's bare `npx`): the two are written for one program, so a source that
-   kept its command and added an `env` variable or an argument later must reach
-   the server it already runs, while a source that switched programs keeps the
-   entry's old command/args/env pairing whole rather than lending its new env to
-   the old command. The unit is projected, not merged: a key the source dropped
-   is removed.
+   again. `url` and `headers` are NOT reconciled — see the fallback's as-a-unit
+   rule below. A stdio entry's `command`, `args` and `env` ARE, as one unit: the
+   three are written for one program. A source naming the program the entry
+   already runs (the discovery module's `_commands_diverged`, which reads the
+   entry's resolved `/…/bin/npx` as the source's bare `npx`) keeps the resolved
+   command and hands over its `args` and `env`, so a variable added later reaches
+   the server. A source that switched programs has its command written too, and
+   the unit it replaced becomes the LAST resolution candidate: a new command that
+   does not resolve on this host keeps the old command with its own `args`/`env`
+   and logs a warning, instead of dropping the server. Two kinds of entry are not
+   switched: one carrying a provenance record (an agent-only declaration), and one
+   whose command the `~/.kiro/crew/mcp.json` store declares, which step 4 writes as
+   before. The unit is projected, not merged: a key the source dropped is removed.
+   A name the edition supplies through `extra_mcp_servers()` keeps its whole
+   command unit (`command`, `args` and `env`), because that invocation is the
+   edition's (`_refresh_dynamic_fields()` refreshes its `command` and `args`);
+   only `timeout` and `disabled` are reconciled onto it, here and in step 3.
 3. **Seam-contributed provider globals**, so they can only fill gaps the Kiro
    global did not: a name step 1 or step 2 already claimed in this pass has been
    retired, so it is left alone. Empty in this build.
@@ -115,7 +122,8 @@ overwritten by a stale global entry.
 with different commands. If the merged winner's `command` does not resolve (a
 bare command whose binary is not on the rebuild PATH), the rebuild retries the
 same server's spec from the other sources in priority order (kirocrew, then
-kiro-global, then provider-global) before dropping it. When it falls back to a
+kiro-global, then provider-global, then the unit a switched source replaced in
+step 2) before dropping it. When it falls back to a
 different source it adopts that source's `command`, `args` and `env` **as a
 unit**, so one source's command is never paired with another's arguments.
 Resolution, the dashboard probe, and the `env.PATH` written into the agent
@@ -135,6 +143,23 @@ than being the whole of it. Consequence to know about:
 the emitted value is a snapshot of the rebuild-time environment, so it encodes
 this host's directories (mise data dir, installed Node version bins, the
 running interpreter's bin) and is not portable to another machine.
+
+**Which Node a bare `npx` reaches.** `env.augmented_path` lists every
+per-version manager dir (nvm, mise, asdf, fnm), newest first, and does not
+check that any of them loads. On Amazon Linux 2 the official Node 18+ builds
+need a newer glibc than the host has, so nvm's newest `node` fails, and an
+`npx` server, whose `#!/usr/bin/env node` resolves against the same PATH,
+never starts. Two dirs name a Node chosen for the host instead
+(`env_node_pins`). The operator's `KIROCREW_NODE_BIN_DIR` comes right after
+this install's own `kirocrew` dir, ahead of every guess and of the inherited
+PATH, even one that already lists it behind nvm's bin. The glibc-2.17 tree
+`ensure-node.sh` unpacks into the data home comes just ahead of the
+per-version dirs: it is an unsealed data-home dir, so it never outranks
+`~/.local/bin` or the toolbox. Each counts only when it holds an executable
+`node`, and a caller that pins another account's home gets neither.
+`mcp_search_path`, `mcp_runtime_path` and the agent child's PATH all inherit
+this order. `kirocrew service install` bakes the override into the unit
+([cli](../system-specs/modules/cli.md)).
 
 ### `includeMcpJson` is pinned false
 
@@ -193,17 +218,25 @@ explicitly granted entry is refreshed on every rebuild by
 `kirocrew` binary, strips stale remote-transport fields (`url`, `headers`) left by
 older builds, and re-pins `env.KIROCREW_HOME` to the home the gateway is actually
 running under while preserving the user's own env keys.
-User customizations are preserved, `autoApprove` included: a list the owner wrote
-by hand is a deliberate statement about their own tools and survives the refresh,
+User customizations are preserved, `autoApprove` included: a list in the user's own
+MCP config survives the refresh, whoever wrote it, the owner or the agent,
 which is what `mcp.honour_auto_approve` (on by default) decides. It is worth
 knowing what it costs, because the cost is not obvious from the key's name:
-kiro-cli approves those tools locally, so Kiro Crew never sees a permission
-request for them and its own tool gate does not run. Turn the setting off to drop
-every verb no server spec declares and put those tools back through the gate. A
-verb a managed or edition spec declares is unaffected either way, and a
-governance ceiling strips the key whatever the setting says.
+those tools run without a prompt, so Kiro Crew never sees a permission request for
+them and its own tool gate does not run. kiro-cli has no `autoApprove` field and
+ignores the key. What grants the tools there is the agent's skill view, the copy of
+the spec kiro-cli runs, rebuilt at every spawn: it carries each kept verb as an
+`@server/tool` entry in its `allowedTools` (`kas_auto_approve.grant_in_skill_view`),
+for every agent, a user's own custom agent included. No spec file is written, so
+the grant goes as soon as the verb does. A session that runs the authored file
+instead (`agent.native_skill_projection` off, or no view could be prepared) and
+`kiro-cli` run outside Kiro Crew get no grant and ask for those tools. Turn the
+setting off to drop every verb no server spec declares and put those tools back
+through the gate. A verb a managed or edition spec declares is unaffected either
+way, and a governance ceiling strips the key whatever the setting says.
 
-Only the OWNER's own list is honoured. An app's `<app>:<server>` entry is granted
+An app's list and Kiro Crew's own are never honoured.
+An app's `<app>:<server>` entry is granted
 by its manifest rather than chosen by the owner; an agent config materialized for an
 app declines the opt-in for its whole map, since an app's keys arrive from the
 manifest, the shipped spec and the per-agent policy and need not be namespaced; and
@@ -215,12 +248,13 @@ a verb a server spec DECLARES still survives.
 Ownership is judged by the entry's shape -- its name and provenance marker -- never by
 who wrote the file, so a plainly-named entry an agent appended reads as the owner's.
 
-On KAS the key has no slot, and the projection drops it from the server entry. The
-verbs `strip_ungoverned_auto_approve` keeps for the kiro-cli route travel instead as
+On KAS the key has no slot either, and the projection drops it from the server
+entry. The verbs `strip_ungoverned_auto_approve` keeps travel instead as
 `@server/tool` entries in the `allowedTools` input the `permissions` block is derived
 from (`acp/kas_auto_approve.py`), so they meet the same per-entry ceiling and
-PreToolUse-hook withholding as any other grant. A verb that is not one literal tool
-name prompts.
+PreToolUse-hook withholding as any other grant. The skill view asks the same two
+filters, so both runtimes grant the same tools. A verb that is not one literal tool
+name prompts on both.
 `~/.kiro/settings/mcp.json` is therefore on the write-protected tier of the file-tool
 floor: an agent's file-edit tools cannot write it. The shell route is not fenced by
 that floor; [governance.md](../system-specs/modules/governance.md#self-protection-the-keystone)
@@ -249,6 +283,16 @@ and asymmetrically on purpose:
   the gate was open, because a skip-only refresh would mean turning a feature off
   never reclaims the process turning it on started;
 
+A spec neither loop wrote (a legacy agent file, or one edited by hand) can still
+declare the entry. On KAS the session projection
+(`kas_agents._project_mcp_servers`) withholds it while the gate is closed, read
+with the writers' own fail-closed snapshot (`_gated_off_servers`, so a gate that
+raises counts as closed). Declared, the engine would launch a backend that
+advertises no tools, and the managed-server readiness barrier
+(`session_handle_mcp.wait_mcp_ready`) would wait out its whole budget on it, so
+every session on that agent would fail to start. The `@server` ref stays, as
+below.
+
 `kirocrew doctor` is a third, read-only consumer: its MCP sections resolve the
 same registry gate (`cli_doctor._spec_gate_closed`) so a gated-off server's
 absence reads as informational rather than as a missing entry, so doctor never
@@ -274,8 +318,8 @@ could live is a sidecar the agent itself can write.
 
 That last point is why the entry's own fields are still dropped rather than stashed:
 a restored `autoApprove` would be an **agent-authored** value that a later rebuild
-installs into the spec, and kiro-cli approves an auto-approved MCP tool *locally* —
-no permission request is emitted, so `hooks.on_tool_call` (deny floor,
+installs into the spec, and a kept verb runs *without a prompt* (the skill view
+grants it in `allowedTools`): no permission request is emitted, so `hooks.on_tool_call` (deny floor,
 sensitive-path check, governance ceiling) and the SEL audit are never reached. For
 tools that can click and type into an already-authenticated application that is a
 self-granted gate bypass. Losing an approval is the safe direction; restoring one
@@ -327,8 +371,8 @@ spawned, never cached, no quarantine verdict — and the dashboard renders it as
 the muted "Not verified" badge with a hint naming `kiro-cli mcp list`.
 
 `kirocrew-computer` carries **no `autoApprove` key and none may ever be added.**
-kiro-cli approves an auto-approved MCP tool locally and emits no permission
-request, so `hooks.on_tool_call` (the PreToolUse deny floor, sensitive-path
+A kept verb runs without a prompt (the skill view grants it in `allowedTools`), so
+no permission request is emitted and `hooks.on_tool_call` (the PreToolUse deny floor, sensitive-path
 check and governance ceiling) is never reached for it. For a tool that can click
 and type into an already-authenticated application, that would be a complete
 gate bypass. Its stdio shim answers an empty `tools/list` while the keystone
@@ -342,7 +386,9 @@ mounts only what `mcpServers` declares, so a ref naming a name absent from the
 final map mounts nothing. Several passes narrow that map without touching either
 list: the resolution pass replaces `mcpServers` wholesale and drops unresolvable
 servers by OMISSION, and the locked app re-merge deletes entries whose app is not
-confirmed enabled. Because the merge base is the previous rendered config, a ref
+confirmed enabled. That re-merge judges a colon-keyed name as an app's only when an
+installed app's manifest mints it: a global or Kiro Crew `mcp.json` server keyed
+`npm:foo` that no manifest claims is the user's, kept and refreshed from its source. Because the merge base is the previous rendered config, a ref
 outlives the server it named — across a rename, an uninstall or a disable.
 
 One `prune_dangling_tool_refs()` pass over the FINAL map therefore runs at the
@@ -415,7 +461,9 @@ grant and its calls go through the gate, where the per-argument rule actually
 applies; a ref the ceiling is silent about is kept. `mcpServers[*].autoApprove`
 gets the same treatment on the final map, with one difference: an owner-written
 verb is KEPT, because `mcp.honour_auto_approve` is on by default, and only a real
-`false` there drops every verb no server spec declares. `tools` is deliberately left intact,
+`false` there drops every verb no server spec declares. A kept verb is not added to
+the file's `allowedTools`: the skill view grants it at each spawn, so a verb the
+owner or the setting later drops leaves no grant behind. `tools` is deliberately left intact,
 because mounting a tool is not auto-approving it. Both outcomes are recorded in
 SEL, `mcp_auto_approve_withheld` when a grant is taken away and
 `mcp_auto_approve_honoured` when an owner-written one is kept, so an operator can
@@ -638,7 +686,12 @@ Probes run from `POST /api/mcp/probe`:
   a spec server kiro-cli starts itself against the names the launch tail put in
   the kiro-cli child's environment (`agent.env` and the scrub included, recorded
   as `_child_env_names`), every other one against `_placeholder_source_env()`,
-  which the routed and session-array paths expand from. Only servers the session
+  which the routed and session-array paths expand from. That view is the gateway's
+  environment with the configured `agent.env` map laid over it, the precedence
+  the kiro-cli child gets, then the same secret, credential and scrub filters, so
+  a variable set only in `agent.env` resolves for a pooled stub's env file, the
+  KAS launcher snapshot and the probe as it does for a server kiro-cli starts,
+  and a secret-named `agent.env` key stays a literal there. Only servers the session
   starts are judged: a spec server on kiro-cli (which reads the spec itself) when
   the entry is not muted, a spec server elsewhere when the array as sent carries
   it (a routed server rides there as a stub), and any other array element on its
@@ -663,7 +716,14 @@ Probes run from `POST /api/mcp/probe`:
   `authChallenge`), and it asks both runtimes' grant stores whether they hold a
   grant for the url to set `authGrantPresent`: kiro-cli's cache (a stat of its
   paired grant artifacts) and the KAS grant vault (whether an entry name is
-  listed; see below). Three wordings follow, one per answer the pair supports:
+  listed; see below). A server whose sign-in Crew holds (`crew_oauth.owns`:
+  `dashboard.feature_previews.crew_oauth` on KAS) is the exception: `authGrantPresent` is
+  Crew's vault (`crew_oauth.holds_grant`) and the row carries `authCrewHeld`,
+  so the table drops Sign in again and the KAS caveat, both false there because
+  Crew serves KAS chats through its proxy. A cached Crew answer is not served
+  once custody ends (flag off, or chats leave KAS): the row reads Not verified
+  until the next probe. Three wordings follow, one per answer
+  the pair supports:
 
   | Evidence | Badge | Why |
   |---|---|---|
@@ -694,7 +754,9 @@ Probes run from `POST /api/mcp/probe`:
 
   **The KAS backend never writes kiro-cli's cache**, so the probe also consults
   the leaf `mcp_grant_kas` module. With `agent.kas_persist_mcp_sign_in` on, the
-  engine's sign-in lands in Crew's dedicated grant vault, and the check parses
+  engine's sign-in lands in Crew's dedicated grant vault, and so does a row's own
+  Sign in while chats run on KAS, which runs on a KAS engine
+  (`connections/mint_kas.py`; see the connections spec). The check parses
   `<data_home>/kas/mcp-grants/.vault/secrets.enc` for its plain-text entry NAMES
   only, looking for `kiro.mcp.<sha256(url.trim().toLowerCase() + "|")>.tokens`.
   The key file is never opened and nothing is decrypted, so only a boolean
@@ -710,6 +772,17 @@ Probes run from `POST /api/mcp/probe`:
   read or parsed. It is a definitive `false` when no envelope exists yet, and
   when `agent.kas_persist_mcp_sign_in` is off: the engine does not use the vault
   then, so it answers without reading the vault or writing an SEL event.
+
+  **Either store reads as Signed in, so the row also says when a KAS chat cannot
+  use the grant.** While ordinary chats run on KAS, every MCP list stamps
+  `kasChatSignIn` on a row that asked for OAuth and whose sign-in Crew does not
+  hold: `chat` when the row's Sign in runs on kiro-cli (persistence off, an
+  `oauth` block, headers, a non-ASCII url, a pre-registered provider), `again`
+  when it runs on the KAS engine but the grant the row holds is one the vault
+  lacks. The table shows one line under the row's sign-in control for each: sign
+  in from the chat, or sign in again here. Any other row carries no key. The
+  vault read behind `again` is the audited `kas_grant_observed`, made only for a
+  row that reads Signed in.
 
   **`grant_presence()` is the single tri-state**, and there is deliberately only
   one spelling of it. Each paired artifact is stat-ed exactly once and classified
@@ -907,6 +980,14 @@ notice when any sibling provider fails. When every attempted provider fails, it
 shows the shared `ErrorNotice` instead of the zero-match empty state. Retry runs
 the whole search again; per-provider retry and provider-cache refresh are not
 part of this contract.
+
+**Add Server opens on a featured list.** `GET /api/mcp/discover?featured=1`
+with no query answers the bundled rows (`discovery_featured`) of every
+available provider, without searching, followed by the rows the edition package
+registry marks `featured: true` (`CapabilityProvider.featured`, read from its
+unfiltered listing within one `_DETAIL_TIMEOUT_SECS`; a failed or late read adds
+none). Every bundled row is an official-registry server, so an edition that
+withholds that registry shows only its own featured rows.
 
 `POST /api/mcp/apply` takes a batched payload and applies it in a fixed order:
 
@@ -1223,15 +1304,33 @@ an approval while it waits prevents the process from starting. A stub with no
 recorded approval needs one in **Customize → Connections → MCP Servers** before it pools. Cached recommendation
 seeding may add a stub route, but it grants no launch approval; the seeded
 row stays on the session-sandboxed path until the operator approves it.
+A rewrite pass checks a launch's approval before the per-server launch cap
+(`launch_approval._MAX_SERVER_LAUNCHES`), which bounds the distinct launches one
+pass retains per name for its refusal record. An approved launch, the exact pair
+or a rebind of its changed `${VAR}` expansion, is therefore wrapped however many
+other agents, read earlier in file order, declare the same name with launches of
+their own. The unapproved launches past the cap are the ones recorded as
+`too_many_launches`, and each is logged with the cap's name rather than as
+unapproved. An approved pair the refusal record has no room for is still counted
+live for its name, so a save does not retire it as an unseen expansion and other
+names' stale expansions are retired as usual. The cap still bounds what a rebind
+adds to the approved pairs.
 
 The MCP Management toggle resolves the launch at the time of the operator's
 choice. Every `stub: true` is a compare-and-set on the launch read at that
 moment (`expected_launch`), the first approval of a name included: the UI reads
 `GET /api/mcp-gateway/servers/launch?name=<name>`, which returns `name`,
 `commands`, `envs`, `complete` and, only when the resolution is complete,
-`expected_launch`. This scrubbed, bounded GET follows the other dashboard
-read routes and does not require owner identity; the POST that records the choice
-remains owner-only. The bulk review reads every candidate at once with the
+`expected_launch`. A resolution is complete when every launch carries its own
+approval identity and its display holds the whole launch. Each command and env
+list is shown in full up to 512 entries and 16384 characters; a list past
+either bound is cut, ends in a `…(partial)` marker, and leaves the server
+unapprovable. An approval covers only a launch the operator can read: a row's
+**Details** and the Review dialog show this display beside the Approve that
+pins it, so a change past a cut would be approved unseen. This scrubbed,
+bounded GET follows the other dashboard read routes and does not require owner
+identity; the POST that records the choice remains owner-only. The bulk review
+reads every candidate at once with the
 owner-only `POST /api/mcp-gateway/servers/launch` and a `names` list of up to 200
 servers. It resolves the whole list in one rebuild and rewrite pass, plus one more
 pass for each extra name sharing a `target_stem` with another (`foo-mcp` and
@@ -1241,7 +1340,9 @@ pass for each extra name sharing a `target_stem` with another (`foo-mcp` and
 `invalid_server_name`, `launch_over_cap` or `launch_unresolved`). `POST /api/mcp-gateway/servers/stub` refuses a missing token
 with 409 `expected_launch_required`, a truncated resolution with 409
 `launch_display_incomplete`, and a token that no longer matches the resolution
-with 409 `launch_changed_since_display`. A batch `stub: true` returns 400
+with 409 `launch_changed_since_display`, or, when the name has a stored refusal,
+with 409 `launch_display_stale` carrying `launch`, the display the GET would
+return now. A batch `stub: true` returns 400
 `batch_stub_requires_individual`; batch `stub: false` is accepted. Turning a stub
 off revokes the approval first, and restores it when the config write does not
 commit. The approval also stores the redacted, bounded display of the approved
@@ -1249,18 +1350,31 @@ launch, so a `changed_needs_reapproval` refusal carries `approved_commands` and
 `approved_envs` beside the new `commands` and `envs`; an approval recorded
 without a display omits both fields. The refusal record carries each command argv
 with its redacted declared environment, scrubbed and bounded before they enter it,
-but the dashboard does not display them: the page shows only that a server needs
-approval, not the command it would run. Status polling only reads that record; it
+and the row's **Details** and the Review dialog display them. A refusal whose
+display was cut is stored `complete: false` with no `expected_launch`, so its
+row offers no Approve. Status polling only reads that record; it
 does not rebuild or resolve agent specs. Every identity serialized into
 `expected_launch` has exactly one command and one environment behind it, so an
 approval covers the exact launch the gateway resolved, pinned by `expected_launch`,
-whether or not any command was shown. One click on the row -- or a confirm in the
+whether or not **Details** was open. One click on the row -- or a confirm in the
 bulk review -- approves the launch read at that moment, sending back the stored
 command/effective-environment pair for the row. The handler compares it
-with both the stored refusal and a fresh resolution before any write; a changed
-launch returns 409 and preserves both stores. A matching launch replaces the
-fingerprint and clears the refusal. A changed command, arguments, or declared
+with a fresh resolution before any write; a changed launch returns 409 and
+preserves both stores. A matching launch replaces the fingerprint and clears the
+refusal, even when the stored refusal pins an older launch. Only a gateway start
+rewrites a stored refusal, so a launch that moves again while the gateway runs (a
+tool update relocating its command) leaves the page showing a refusal no press can
+match: that miss is `launch_display_stale`, and its `launch` is what the row and
+the bulk review then show and pin in the refusal's place, so the next press
+approves it without a restart. A changed command, arguments, or declared
 environment requires the same re-approve flow.
+`kirocrew config set mcp_gateway.stub_servers` (on `--local` and `--file` too)
+writes the list unchanged, then names on stderr each listed server the store
+holds no approved launch for: the next gateway start refuses it as
+`added_outside_dashboard` until it is approved in **Customize → Connections →
+MCP Servers**, and a `secret://` reference in its env resolves only once the
+gateway runs it. A reserved `kirocrew-*` server, whose managed launch needs no
+approval, and a never-pooled one are not named.
 
 On the page, the hero card holds the page-wide sharing switch and the
 measured memory figures (`GET /api/mcp-gateway/footprint`, owner only, PSS read
@@ -1276,7 +1390,13 @@ Turning it on reads the launch, then sends the stub write carrying that
 as `changed_needs_reapproval` reads **Paused · command changed**. It runs
 nothing shared, so its switch reads off; pressing it writes nothing and moves
 focus to **Approve update**, which is the only control that approves the new
-launch, pinned to the refused launch's own `expected_launch`. A row refused as
+launch, pinned to the refused launch's own `expected_launch` (or to the launch a
+`launch_display_stale` answer brought, which Details then shows). That answer is
+a rejected write, so both surfaces say it through `ErrorNotice` with the agent
+hand-off: the page in one notice naming the server and pointing at its Details,
+and the Review dialog inside that server's block, above the launch it then
+shows, never on the page as well. An answer that brings no launch to show reads
+as a changed launch. A row refused as
 `added_outside_dashboard` reads **Paused · not approved yet** and behaves the
 same with **Approve**. A marked row that cannot share (a refusal with no
 approvable identity, or an env a shared copy would withhold) has no switch,
@@ -1285,10 +1405,29 @@ the launch in the gateway's display-safe form (argv, env key names, never a
 value), with the approved launch beside the new one for a changed command, the
 changed arguments and env names said once above them and marked in the new
 one.
+A `changed_needs_reapproval` refusal that only added a launch, such as a second
+agent declaring the same server with its own arguments, reads **Paused · new
+launch to approve** instead, and its Details line says the approved launch did
+not change. That holds when the refusal is complete and every approved
+command/env display pair is still among its live pairs, beside at least one
+that is not approved. The rule reads only the refusal's own bounded, redacted
+displays (a hidden env value compares by its short hash), so a partial refusal,
+one missing either side, or one whose approved launch shows a redaction tag (two
+different values read as the same tag) keeps **Paused · command changed**, as
+does an approved launch that changed, whatever was added beside it. The control is the
+same **Approve update**, and `kirocrew doctor` names such a server `new launch
+not approved yet` from the same record (`doctor_checks/mcp.py`, mirroring
+`refusalOnlyAddsLaunches` in `mcpManagementModel.ts`).
 **Review and approve** opens a dialog over the waiting servers only, one
 Approve per server, the same pinned write; there is no approve-all.
 **Enable all shareable** lists the candidates by name and shares on one more
-press.
+press. Below the table, **Pre-install npm servers** carries a one-line
+description of what it installs (the approved `npx` launches of the servers with
+Share on) and of what **Update now** does; that line is also the button's
+accessible description. The hero's **Learn more** and the confirm dialog's
+**Learn more in the docs** both open
+[Sharing MCP servers across chats](../../src/kiro_crew/docs/connections.md#sharing-mcp-servers-across-chats),
+the user guide section that explains the page in its own labels.
 
 The gateway-owned `mcp/resolved/`
 store is sealed read-only in
@@ -1335,7 +1474,10 @@ each stub's argv as `--read-limit`, and the stub resolves its ceiling as
 default. Because the value rides the overlay, `read_buffer_limit` is an input to the
 rewrite fingerprint, so changing the key regenerates the overlays.
 `test_mcp_gateway_stub_import_budget.py` pins the module set a running stub holds,
-which is what keeps the config package out of it. `socket_path`, `overlay_dir`,
+which is what keeps the config package out of it. The Connections page's stdio
+discovery probe calls `read_limits.resolve_read_buffer_limit()` each time it spawns
+a server, so a server whose `tools/list` the gateway reads does not probe as an
+error. `socket_path`, `overlay_dir`,
 `idle_timeout_secs`, `max_backends`, `prewarm_count`, `stub_servers`,
 `poolable_servers`, `stub_overrides`, `pool_identity_env`,
 `forward_declared_env`, `spawn_concurrency_initial`, `spawn_concurrency_min`,
@@ -1382,15 +1524,18 @@ and are **not** dimensions: `sandbox_mode`, `autoapprove_set_hash`,
   process rather than a second sandbox. The compensating controls that do the
   real work here — the target command coming only from the rewriter's
   `KIROCREW_MCP_TARGET_<SERVER>` vars, credential-env scrubbing before `gatewayd`
-  inherits, and backends running as the invoking user — are all per-host, not
-  per-key.
+  inherits (the one key added back is the gateway's boot-time `SSH_AUTH_SOCK`,
+  for the backends an operator names in `ssh_auth_sock_consent.json`), and
+  backends running as the invoking user — are all per-host, not per-key.
 - **Approval is decided before a call reaches the gateway.** Tool visibility, the
-  `autoApprove` list, the approval mode and trust-all are kiro-cli's own
-  per-agent decision, taken against that agent's overlay entry. What arrives at
+  `allowedTools` grants (a verb a server's `autoApprove` keeps among them, as an
+  entry of the agent's skill view: kiro-cli has no `autoApprove` field), the
+  approval mode and trust-all are kiro-cli's own per-agent decision, taken against
+  that agent's view and overlay entry. What arrives at
   the stub is a `tools/call` kiro-cli has already authorised. A backend never
   receives these values and cannot act on them, so they cannot change its
   behaviour. The rewriter deliberately **preserves `autoApprove` on each wrapped
-  entry** (`_build_stub_entry`) precisely so that per-agent surface survives
+  entry** (`_build_stub_entry`) so that each agent's own list survives
   pooling; the stub's `--auto-approve` / `--approval-mode` / `--trust-all` flags
   feed only the register payload.
 
@@ -1662,6 +1807,31 @@ per-session `--channel-id` appended by `session_servers` rides its own envelope.
 A cached plain-flag overlay fails the rewriter fingerprint and is regenerated. The
 interpreter path in the entry's `command` is the one value the codec cannot
 cover: the CLI runs it, not the stub.
+
+### A settings server is pooled only into an agent whose `tools` names it
+
+The rewriter wraps each stubbed stdio server of `~/.kiro/settings/mcp.json` into the
+overlays of the agents that read that file (`rewriter_spec._injectable_settings_servers`),
+and `session_servers.pooled_session_servers` sends every wrapped overlay entry at
+`session/new`, where the session mounts it without asking `tools`. So a settings
+server enters an agent's overlay only when that agent's `tools` names it (`*`,
+`@server` or `@server/tool`, under the raw key or its alias; `rewriter_spec._named_in_tools`),
+the allowlist a mirror applies to its own stubs (`session_mcp.ToolsAllowlist`), and an
+agent with `includeMcpJson: false` gets none. A server left out is one the agent's `tools`
+cannot reach anyway; with `includeMcpJson: true` the host's own `mcp.json` merge still
+starts it, unpooled. The exception is a server whose env holds a `secret://` reference
+(`rewriter_env._must_stay_wrapped`): that merge would start it with the literal
+reference, so an agent whose `tools` leaves it out gets a refusing stub instead
+(`rewriter_spec._refusing_stub_entry`). Sent at `session/new` like any stub, it outranks
+the merge; it runs `stub --refuse`, which starts nothing, never reaches the gateway and
+answers as a server with no tools (`stub_link._serve_refusal`). It names no target, so
+`gatewayd` is handed none for it, and another agent's approved launch of the same server
+cannot serve this agent. KAS needs the same on its custom agent: its `includeMcpJson: true`
+mounts every MCP tool on top of `tools`, so `acp/kas_agents.py` forwards that flag only
+as `false`. The opt-in still decides which `mcp.json` servers a KAS agent may start:
+`acp/harness/kas.py` stamps the spec's own `true` (`kas_settings_mcp.stamp_settings_mcp`),
+and `kas_settings_mcp.excluded_whole` reads it there, so a `tools` ref still reaches its
+server.
 
 ### Overlay scope: user-level agents only
 
@@ -2016,7 +2186,7 @@ govern the sign-in.
 One missing identity reaches a reader through three refusals -- this
 `identity_unattested` text when a key is declared, the strict-identity diagnosis behind
 `memory_recall` and every other reflexive tool when none is, and the lesson writers'
-(`learn_add`, `learn_remove`) answer to the gateway's `400 missing_session_key` (mapped
+(`learn_add`, `learn_remove`, `learn_update`) answer to the gateway's `400 missing_session_key` (mapped
 onto the same established-session refusal instead of echoing the header name). When the
 process carries neither the session token nor a launcher host pid
 (`mcp_shared.spawned_without_gateway_identity`), nothing the gateway does at spawn
@@ -2237,7 +2407,9 @@ external text redacted). Data only, never a transport. A `request_capabilities`
 draft that names `additions` has them resolved by the gateway into the card's
 operations (`additions_to_draft`): a gateway server's own entry, an official
 registry install plan (`mcp_discover.official_install_plan`, the spec
-`/api/mcp/discover/install` would write), or a loaded skill; the card states
+`/api/mcp/discover/install` would write), or a loaded skill (an edition
+package is refused `edition_package`, naming its `mcp.install` card, as for
+`request_server`); the card states
 where each comes from and which tools would run without asking, and pressing it
 writes the Bot's own file in place (crew-mode.md, "Conductor and
 worker"). The worker mounts neither tool (`MATE_WORKER_EXCLUDED_TOOLS`).
@@ -2484,9 +2656,13 @@ only `request_server` raises it (see *Asking for an MCP server mid-chat*).
 `setting.change` takes a Settings-registry `setting_id` (found with
 `find_setting(query)`, which returns up to ten matches with `writable`,
 the current value and the allowed values, never a credential value) or a raw
-config `path`. `find_setting` matches a query word at the start of a word in a
-setting's id, label, help or config key, after dropping question words such as
-`how`, `do` and `I` (kept when nothing else is left); a setting ranks by the
+config `path`. A `path` segment after the first may also hold a capital or `-`,
+as a Bot or app name does, so `agents.<name>.approval_mode` reaches the resolver
+for every Bot name and is refused there `setting_not_editable`, like every path
+that is not an `_EDITABLE_CONFIG` key or a dashboard key (a Bot's own fields are
+a `crewmate.update` card). `find_setting` matches a query word at the start of a
+word in a setting's id, label, help or config key, after dropping question words
+such as `how`, `do` and `I` (kept when nothing else is left); a setting ranks by the
 words it holds, a word in its id or label counting three times, and a word found
 on many settings counting for little. The write target is resolved from data: the dashboard-config
 controls in `change_card_catalog.DASHBOARD_SETTINGS` (Response Verbosity and the
@@ -2892,11 +3068,15 @@ answers `tools/list` from):
 - **Workflows and hooks:** `workflow_author`, `workflow_run`,
   `workflow_library_list`, `workflow_status`, `workflow_result`, `workflow_list`,
   `workflow_cancel`, `workflow_rerun_subtree`, `register_hook`
-- **App bridges:** `issue_radar_record_investigation`,
-  `ops_mission_control_api`, `design_tweak_update_thread`, `pod_up`, `pod_restart`,
-  `pod_down`, `pod_status`, `pod_ls`, `issue_radar_crew_read`, `issue_radar_crew_record`.
-  Listed only while the app each one reaches is enabled — see § An app's tools
-  follow the app's enablement below.
+- **App-declared tools:** whatever a first-party app declares in its manifest
+  `agentTools` block, such as Design Tweak's `design_tweak_update_thread`, Issue
+  Radar's `issue_radar_record_investigation`, `issue_radar_crew_read` and
+  `issue_radar_crew_record`, Dev Fleet's `pod_up`, `pod_restart`, `pod_down`,
+  `pod_status` and `pod_ls` (declared under the namespace `pod`, so they keep the
+  names they had as core tools), and Ops Mission Control's `ops_mission_control_api`.
+  The app
+  serves each call from its own process; this server lists the tool and forwards the
+  call (below).
 - **Browser:** `browser`
 - **Diagnostics:** `resource_status`, `kiro_cli_logs` — a redacted tail of kiro-cli's own mcp/lsp protocol logs, so
   the agent can self-diagnose a rejected turn. Reads log files only: never the
@@ -2924,21 +3104,25 @@ answers `tools/list` from):
   once before reading, independently of memory version or database availability;
   workspace filtering, audit attribution and summary requests reuse that key.
 
-- **App bridges (credentialed):** `ops_mission_control_api` — the MCP server
-  process holds the gateway's internal secret and forwards only a frozen
-  (method, path) allowlist of Ops Mission Control routes; the agent never
-  sees a credential (same shape as `issue_radar_record_investigation`).
-  `design_tweak_update_thread` — the same shape for the Design Tweak app: the
-  server forwards a single route (`POST /apps/design-tweak/api/thread`, the
-  gateway's app reverse-proxy path) so
-  the agent can mark a batched visual-edit comment in progress or done as it
-  applies it. `status` is restricted to `done` (forward progress only — no
-  clear/dismiss), and the gateway admits only that one path for internal-secret
-  callers, never the app's state-mutating routes. The tool is the app's own
-  data: its `agent_tools.py` declares the descriptor, the fields, the route and
-  the body, and the core builds the tool from that declaration and runs it with
-  one handler of its own (`mcp_tools/apps.py` `builtin_agent_tool`; see
-  [app-kit-platform § 30.1](../system-specs/modules/app-kit-platform.md#301-a-built-ins-agent-tool-is-the-built-ins-own-data))
+- **App-declared tools (credentialed, app-served):** the `app_tools` domain
+  (`mcp_tools/app_tools.py`, the last in `DOMAIN_MODULES`) lists each tool a
+  first-party app declares in its manifest `agentTools` block (a third-party app
+  would inherit this server's whole-server auto-approval, so its block lists
+  nothing; app-kit-platform.md section 30.1), validates a call
+  against the declared schema, and posts `{tool, arguments}` to the strict
+  internal route `POST /api/app-tools/call`. The gateway checks the call again
+  against the declaration and hands it to the declaring app's own route, through
+  the signed app proxy or the app route registry, so no app code runs in this
+  server and no app route is admitted to internal-secret callers. A name another
+  domain declares is never an app's. Design Tweak's `design_tweak_update_thread`
+  is served this way: `status` is restricted to `done` and every string is
+  bounded by its declaration. So are Issue Radar's three tools; its two crew tools
+  are declared `strictSession`, so this server posts them only from a session it
+  identifies directly and sends that session's key, and the app resolves the crew
+  from it. So is Ops Mission Control's `ops_mission_control_api`, whose route holds
+  the (method, path) allowlist of the app's SOP routes, the query and body rules, the
+  inbound scrub and the channel-agent hold of `POST /rotation/arm`. See
+  [app-kit-platform § 30.1](../system-specs/modules/app-kit-platform.md#301-an-apps-agent-tools-are-declared-in-its-manifest-and-served-by-the-app)
 
 ### Server instructions travel with the server
 
@@ -3019,7 +3203,15 @@ change card, and the server is written to the template's additions record
   (`member_capability_catalog.resolve_server`, shared with
   `request_capabilities`): `source: "gateway"` copies a server this gateway runs
   and has switched on, `source: "registry"` takes the official registry's
-  install plan. A gateway entry that carries env, headers or credential
+  install plan. An id the official registry cannot resolve (absent, as on an
+  edition that withholds it, or lacking the id) but the edition package
+  registry holds (`mcp_discover.edition_package_detail`, the `capability`
+  provider) is refused `edition_package`: that registry installs through the
+  edition's manager and has no install plan to record, so the refusal names the
+  `mcp.install` card with `{"provider": "capability", "id": <id>}` instead.
+  That card installs it onto the MCP page and the default agent; another
+  agent then asks for it with `source: "gateway"`. A gateway entry that
+  carries env, headers or credential
   arguments is refused `carries_settings`, because a card's params reach the
   agent that asked; such a server is added on the MCP page, where secrets come
   from the existing store. The entry then passes
@@ -3094,7 +3286,12 @@ change card, and the server is written to the template's additions record
   `DELETE /api/agents/detail/{name}/mcp-additions/{server}?card_id=<card>`, both
   card-hooked routes that refuse any internal caller `403 owner_only`; the POST
   also refuses a request with no card (`403 card_required`), so the only entry
-  ever recorded is one a card showed. The Undo calls `remove_addition` with the
+  ever recorded is one a card showed. The one exception is the Settings write
+  (Settings > Developer > Agent MCP servers): a card-less body of exactly
+  `{server, mount_only: true}` for a set in
+  `template_server_request.MANAGED_MOUNT_ONLY_SETS` on the default agent. It
+  sends no entry, so the gateway builds the managed launch line, and it is
+  recorded under `SETTINGS_CARD_ID`. The Undo calls `remove_addition` with the
   card id, so a later approval of the same server on another card survives it.
   The Apply records with `only_if_absent=True` too: a server another card added
   after this card's own check answers `409 already_added` and is left as it is.
@@ -3130,7 +3327,9 @@ nothing at runtime notices when only one half lands:
   descriptor, never add or reshape one
   (`test_a_domain_advertises_only_what_it_declares`). The names-only build
   (`build_tool_names`, the in-process discovery read) takes `schemas()` and never
-  consults `advertised()`. `apps` is the one domain that defines one, below.
+  consults `advertised()`. `apps` defines one, below, and so does `app_tools`, whose
+  `schemas()` names every tool a shipped first-party manifest declares so an app
+  agent's deny universe holds it before the app is installed.
 - Its **handler** is an entry in that module's `HANDLERS` map, called as
   `handler(name, args)`. `dispatch()` finds it by name and
   `mcp_core._call_tool_inner` delegates to that.
@@ -3164,27 +3363,20 @@ of its responsibility:
 
 ### An app's tools follow the app's enablement
 
-The ten `apps`-domain tools each reach one built-in app — Issue Radar
-(`issue_radar_record_investigation`, `issue_radar_crew_read`,
-`issue_radar_crew_record`), Dev Fleet (`pod_up`, `pod_restart`, `pod_down`,
-`pod_status`, `pod_ls`), Ops Mission Control (`ops_mission_control_api`) and Design Tweak
-(`design_tweak_update_thread`) — through gateway routes that refuse the call with
-HTTP 403 while the app is disabled, on `kiro_crew.apps.manager`'s read of the
-app's `installed.json`. The refusal body differs per app — Dev Fleet's routes and
-the app reverse proxy Design Tweak sits behind (`handle_app_api_proxy`) name it
-`app_not_enabled` (#10742), Ops Mission Control `app_disabled`, Issue Radar
-carries no `code` — so nothing here keys on a code; the predicate behind all four
-is the same `is_app_enabled` read. `tools/list` advertised every one of them
+Every built-in app's agent tools — Design Tweak's, Issue Radar's, Dev Fleet's and Ops
+Mission Control's — are declared in its manifest and listed by the `app_tools` domain;
+the `apps` domain that once held the hand-written ones is gone. `POST
+/api/app-tools/call` refuses a disabled app's call with `app_not_enabled`, on
+`kiro_crew.apps.manager`'s read of the app's `installed.json`. `tools/list` advertised every one of them
 regardless (#16099), so a
 session with none of the apps enabled was told about tools that could only
 refuse — and because kiro-cli reads `tools/list` once per session and Crew's own
 servers are exempt from `tool_search` deferral, each one cost its full schema in
 every request of that session.
 
-`mcp_tools.apps.advertised()` therefore emits a tool's descriptor only while its
+`mcp_tools.app_tools.advertised()` therefore emits a tool's descriptor only while its
 app is enabled, and the decision reads **the same record the call refusal reads**:
-`TOOL_APPS` names the installed app behind each tool (pinned to the apps'
-own `APP_NAME` constants by `test_mcp_apps_tool_gate`), and the listing reads
+each declared tool names the app whose manifest declares it, and the listing reads
 that app's `installed.json` through `kiro_crew.apps.manager`, the module the
 route's `is_app_enabled` reads it through. One file, one module, two readers:
 the route's binary `is_app_enabled` treats an unreadable record as disabled and
@@ -3250,11 +3442,10 @@ to the owner of its responsibility:
 | Owner | Owns |
 |---|---|
 | `identity` | which session is calling: the lenient and strict resolvers, `require_strict_session_key` and its diagnosis, `REFLEXIVE_TOOL_MODULES`, the Slack identity classification |
-| `gateway` | where a call goes: the port, base URL and unix-socket caches, one request's target, the refused-target replay and re-verification, the internal secret, the identity headers, and `_send`'s retry schedule, failure text and error body |
+| `gateway` | where a call goes: the port, base URL and unix-socket caches, one request's target, the refused-target replay and re-verification, the internal secret, the identity headers, `_send`'s retry schedule, and failure text and error body |
 | `governance` | channel-agent containment and the messaging, browse, channel and memory-write vets |
 | `crew` | Ultra Mode's `route_crew` and `select_crew` bodies |
 | `history` | the chat-history search tools' scoping, redaction and snippet helpers |
-| `radar_crew` | the Issue Radar crew tools' identity, ledger view and write scrubbing |
 
 `mcp_cron.py` keeps the cron server itself — argument validation, the call path, the
 caller's identity and ownership checks, the tool bodies (`_call_tool_inner`) and the
@@ -3714,8 +3905,9 @@ Bot's side panel (`members.panel`, `MembersPage`, the scope of the header
 opener that reveals its Dashboard tab, `members.dashboard-tab`), `menu:`
 scopes of the sessions list and create menus, the artifacts add menu, the
 terminal and side-panel menus, the Bots add menu and switcher, App Store
-sources, the composer add menu, the notifications sheet, and the Connections
-MCP tab (`open:connections.mcp-servers-tab`). A scope with no owner mounted reads
+sources, the composer add menu, the notifications sheet, the Connections
+MCP tab (`open:connections.mcp-servers-tab`), and Knowledge's Sources view
+(`open:knowledge.sources-tab`, `KnowledgePage`). A scope with no owner mounted reads
 `unknown` and a step on it keeps its `reach` fallback (a later target on
 screen). A reporter of a runtime predicate is `useGuidePredicate(id, value)`
 (`ChatPage` reports both sessions-toggle predicates, `App` reports
@@ -5195,7 +5387,11 @@ anything that is not an object. `None` there never means end of stream. The
 discovery probe's stdio reader is the one deliberate difference: it counts only
 lines that are not JSON toward its banner cap, so a server printing a JSON
 progress counter before it answers is bounded by the probe's timeout like a
-notification, not mistaken for a flood. The stub's admission wait skips a frame
+notification, not mistaken for a flood. When the probe fails after skipping such
+lines (EOF, the banner flood or the timeout), its error carries the last few of
+them under a `stdout:` label, ahead of the `stderr:` tail it already appends and
+through the same two redactors, because a launcher that cannot start its server
+prints why on stdout and exits. The stub's admission wait skips a frame
 that is JSON but not an object; text that is not JSON, or `null`, still ends it
 as closed (the daemon is not speaking the protocol), and the handshake falls
 back on either.
@@ -5307,7 +5503,11 @@ decodes the marker, applies the effect against **its own** `slot.key`, then
 strips the marker from the stored transcript. Sub-agent isolation is therefore
 structural rather than cryptographic: a sub-agent's tool result flows through the
 sub-agent's own runner, so it can only bind to the sub-agent's session. There is
-no walk to get wrong.
+no walk to get wrong. The model still reads the marker, so a reply that repeats the
+result carries the marker line too; the dashboard's segment flush drops each line
+that is only such a marker from the saved reply
+(`session_directive.strip_quoted_markers`) and keeps the reply's other lines, and
+the channel `TurnDriver` drops the same lines from the streamed reply.
 
 A second, provider-neutral channel covers a backend that emits no
 `_meta.kiro` identity. After encoding, the tool reports the CALL (tool name and
@@ -5600,8 +5800,8 @@ the same identity installed: `written` is True only when `respond()` reports the
 whole frame written to the client's own pipe, and never for a pooled backend,
 whose frame lands in the broker. `spawn_sub_agents` marks the children its reply
 carries collected only there, on True -- never in its collect step, in
-`on_settled`, or for an abandonment reply. For every parent that is not
-dashboard-born that mark is held only under the attempt that spawned the child,
+`on_settled`, or for an abandonment reply. For every parent that mark is held
+only under the attempt that spawned the child,
 the token `(key, task, epoch)` opened at the parent tool's spawn, done read or
 landing note and ended by `settle_turn` or `release`, and only an attempt that
 landed confirms it (`kiro_crew.parent_turns`). The spawn names the attempt that
@@ -5683,8 +5883,8 @@ its start, so a parked `wait` is old but never slow, and a backend that advertis
 the report is held to `PROGRESS_WEDGE_CEILING_SECS` (900s) instead of
 `HARD_WEDGE_CEILING_SECS` (`SUBAGENT_TIMEOUT_SECS + 300`, about 3 hours): an age
 that old on a reporting backend is a worker call that stopped progressing, and no
-shipped synchronous tool runs that long on purpose (the longest, `pod_up`, bounds
-itself at 210s). A backend that never advertised -- an older install, the Windows
+shipped synchronous tool runs that long on purpose (the longest, Dev Fleet's `pod_up`,
+declares a 210s `timeoutSeconds`). A backend that never advertised -- an older install, the Windows
 loop -- keeps the long ceiling, because it cannot tell a parked call from a hung
 one, and so does every server other than `kirocrew-core`. A forwarded
 `notifications/cancelled` marks the pending entry cancelled
@@ -5705,16 +5905,21 @@ asked, and would at best drop the frame as unattributable.
 On an identity-capable server, the upstream release of a caller's subscription
 to a URI is held while another stub of that caller is routed for the URI, or
 while a same-caller subscribe for it is in flight
-(`Backend._hold_identity_release`), whether or not anything was cancelled. The
-unsubscribing stub is answered locally, and with no such stub routed the first
-same-caller subscribe in flight inherits the release
-(`_PendingRequest.release_owed`). A grant that routes a stub discharges it,
-because the caller's one upstream subscription now serves that stub, whose own
-departure releases it. A refusal, an unknown verdict or a grant that routes no
-stub has the gateway send it as that caller, unless the rule still holds.
-When the unsubscribing stub was the last one routed for the URI, the URI is
-orphan-marked while the release waits, as detach does, so an update the
-server sends for the still-live subscription is dropped without a hazard.
+(`Backend._hold_identity_release`), whether or not anything was cancelled.
+This decides the release that falls due on a stub's final unsubscribe
+(answered locally when held), its detach, a warm-pool claim's eviction
+(`evict_stub_subscriptions`), and the release sentinel's grant of a subscribe
+no stub is left to receive. With no such stub routed the first same-caller
+subscribe in flight inherits the release (`_PendingRequest.release_owed`). A
+grant that routes a stub discharges it, because the caller's one upstream
+subscription now serves that stub, whose own departure releases it. A refusal,
+an unknown verdict or a grant that routes no stub has the gateway send it as
+that caller, unless the rule still holds. The rule is per caller, so a stub of
+another caller routed for the URI does not hold the release; a sentinel grant
+without caller identity, or for a subscribe with no caller, is released only
+when no stub is routed for the URI. While a release is held and no stub is
+routed for the URI, an update for that URI is dropped without a hazard,
+whichever caller's stub left last.
 
 ### Checklist for a new tool
 

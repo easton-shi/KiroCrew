@@ -40,12 +40,15 @@ from kiro_crew.providers.acp import AcpProvider
 
 pytestmark = pytest.mark.xdist_group(name="tree_scan_acp_bindings")
 
-SHARED_BINDINGS_CHECKS = ("the_field_scan_counts_every_read_and_write_shape",)
+SHARED_BINDINGS_CHECKS = (
+    "the_field_scan_counts_every_read_and_write_shape",
+    "the_class_only_scan_can_fail",
+)
 
 #: Member -> (kind, coroutine, signature digest, owning module). Frozen at the split: the
 #: kind, coroutine flag and signature are BASE's; the owner is where the member lives now.
 _MEMBERS: dict[str, tuple[str, object, str, str]] = {
-    "__init__": ("function", False, "2c65337d97d7", "acp"),
+    "__init__": ("function", False, "f9df55c15d04", "acp"),
     "_abc_impl": ("data", False, "", ""),
     "_advertised_effort_levels": ("function", False, "93b23ca4342b", "acp_model_effort"),
     "_apply_effort_overlay": ("function", False, "66550c0d40fa", "acp_cli_overlay"),
@@ -62,6 +65,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "_owning_session_key": ("function", False, "bb418bb7ece8", "acp_runtime_start"),
     "_ready_confirmed_session": ("function", True, "b60c5fea256e", "acp_turns"),
     "_reclaim_work_dir": ("function", True, "b60c5fea256e", "acp_lifecycle"),
+    "_recover_effort_overlay": ("function", True, "b60c5fea256e", "acp_cli_overlay"),
     "_resolve_effort": ("function", False, "f21e39ec5ffb", "acp_model_effort"),
     "_set_effort_config_option": ("function", True, "b9de7871fd78", "acp_model_effort"),
     "_start_kiro_runtime": ("function", True, "b60c5fea256e", "acp_runtime_start"),
@@ -104,6 +108,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "get_valid_effort_levels": ("function", False, "6806e867af4e", "acp"),
     "harness_compact_verb_advertised": ("property", False, "a6632a57e602", "acp"),
     "harness_managed_compaction_backend": ("property", False, "f21e39ec5ffb", "acp"),
+    "harness_pin": ("property", False, "bb418bb7ece8", "acp"),
     "has_active_turn": ("function", False, "a6632a57e602", "acp"),
     "has_unfinished_turn": ("function", False, "a6632a57e602", "acp"),
     "is_acp_runtime_backend": ("property", False, "a6632a57e602", "acp"),
@@ -125,6 +130,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "kas_command_call": ("function", True, "0c8766b65545", "acp"),
     "kas_projected_agent": ("property", False, "bb418bb7ece8", "acp"),
     "kas_registered_agents": ("property", False, "908b88c4efab", "acp"),
+    "kiro_cli_model_notice": ("property", False, "bb418bb7ece8", "acp"),
     "last_compaction_transient": ("property", False, "a6632a57e602", "acp"),
     "last_infra_error": ("property", False, "134c3f4bdad2", "acp"),
     "last_steer_monotonic": ("property", False, "59162e39f6f1", "acp"),
@@ -143,6 +149,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "member_capabilities_supported": ("property", False, "a6632a57e602", "acp"),
     "member_dispatch_mounted": ("property", False, "16180c63d5e6", "acp"),
     "member_tool_limits_supported": ("property", False, "a6632a57e602", "acp"),
+    "mode_pinned_notice": ("property", False, "bb418bb7ece8", "acp"),
     "model_pin_partial": ("property", False, "bb418bb7ece8", "acp"),
     "model_pin_refused": ("property", False, "bb418bb7ece8", "acp"),
     "native_context_documents": ("property", False, "8cab7a4db01b", "acp"),
@@ -153,7 +160,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "prompt_timeout_for_deadline": ("function", False, "b97d05f9c710", "acp"),
     "prompts_written": ("property", False, "8dc15be1dfda", "acp"),
     "reapply_live_effort": ("function", True, "581451d2b011", "acp_model_effort"),
-    "reject_tool": ("function", True, "84bed4474307", "acp"),
+    "reject_tool": ("function", True, "8f224062db90", "acp"),
     "reports_effort_support": ("data", False, "", ""),
     "reports_turn_usage": ("property", False, "a6632a57e602", "acp"),
     "served_model": ("property", False, "bb418bb7ece8", "acp"),
@@ -163,6 +170,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "session_id": ("property", False, "bb418bb7ece8", "acp"),
     "set_delete_delay": ("function", False, "ef2ab8d662c5", "acp"),
     "set_model": ("function", True, "9c3df1e3fc63", "acp_model_effort"),
+    "set_ultracode": ("function", True, "f3245181ea43", "acp_model_effort"),
     "set_work_dir_claim_probe": ("function", False, "5fa0fa7a5959", "acp_lifecycle"),
     "settings_withheld_cause": ("function", False, "bb418bb7ece8", "acp"),
     "shutdown": ("function", True, "b60c5fea256e", "acp_lifecycle"),
@@ -170,7 +178,7 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "steer": ("function", True, "b0a837a37097", "acp_turns"),
     "steer_needs_loss_recovery": ("property", False, "a6632a57e602", "acp"),
     "steer_upgrade_notice": ("property", False, "bb418bb7ece8", "acp"),
-    "stream": ("function", "agen", "e4e5c768b805", "acp_turns"),
+    "stream": ("function", "agen", "fa113e1bf480", "acp_turns"),
     "stream_command": ("function", "agen", "c5944af5c808", "acp_turns"),
     "supports_effort": ("function", False, "a6632a57e602", "acp_model_effort"),
     "supports_refusal_steer": ("property", False, "a6632a57e602", "acp"),
@@ -178,8 +186,10 @@ _MEMBERS: dict[str, tuple[str, object, str, str]] = {
     "take_batch_refusal": ("function", False, "85a6851f62f8", "acp"),
     "tested_version_notice": ("property", False, "bb418bb7ece8", "acp"),
     "tool_search_settings": ("property", False, "da838953900b", "acp"),
+    "telemetry_unconfirmed_notice": ("property", False, "bb418bb7ece8", "acp"),
     "touch_activity": ("function", False, "b60c5fea256e", "acp"),
     "turn_survives_disconnect": ("property", False, "a6632a57e602", "acp"),
+    "ultracode_enabled": ("function", False, "16180c63d5e6", "acp_model_effort"),
     "uses_kiro_identity_store": ("property", False, "a6632a57e602", "acp"),
     "wait_for_compaction": ("function", True, "1d8ef804d52e", "acp_turns"),
     "wait_for_declared_mcp": ("function", True, "921c3727b83c", "acp"),
@@ -300,11 +310,6 @@ def _class_only_constructs(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[s
         if isinstance(spelled, str) and spelled.startswith("__") and not spelled.endswith("__"):
             found.append(spelled)
     return found
-
-
-def test_the_class_only_scan_can_fail() -> None:
-    tree = ast.parse("def f(self):\n    super().g()\n    return __class__, self.__hidden\n")
-    assert sorted(_class_only_constructs(tree.body[0])) == ["__class__", "__hidden", "super()"]
 
 
 @pytest.mark.parametrize("owner", acp_provider._ACP_PROVIDER_OWNERS)

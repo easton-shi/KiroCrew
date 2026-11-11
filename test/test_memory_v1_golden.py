@@ -729,6 +729,8 @@ def test_seeded_home_file_set_is_pinned(seeded: Seeded) -> None:
     * ``config.json.lock``: ``config.loader``'s advisory lock.
     * ``connections_ui_migrated.json``: the loader's one-time migration marker.
     * ``config-provenance/published``: ``config.write_provenance``, POSIX only.
+    * ``config-provenance/endorsed/config.json``: the same save's endorsed copy
+      (``config.loosening_provenance``), every platform.
     * ``superseded_acked.json`` and its ``.lock``: ``config.windows_exec_adoption``
       records an absent ``agent.sandbox_allow_unsandboxed_exec`` once, Windows only.
     """
@@ -741,6 +743,7 @@ def test_seeded_home_file_set_is_pinned(seeded: Seeded) -> None:
     )
     assert _home_files(seeded.home) == provenance | exec_close | {
         "agent-prompt.md",
+        "config-provenance/endorsed/config.json",
         "config.json",
         "config.json.bak",
         "config.json.lock",
@@ -880,8 +883,14 @@ def test_an_early_embed_leaves_the_first_turn_byte_identical(
     assert seeded.inference_calls == [query]
 
 
-def test_memory_written_after_an_early_embed_reaches_the_first_turn(seeded: Seeded) -> None:
+def test_memory_written_after_an_early_embed_reaches_the_first_turn(
+    seeded: Seeded, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Only the query's vector is kept: the store is read when the build runs."""
+    # The late episode shares EP_TOP's topic vector, so FAISS's near-duplicate
+    # check refuses it; the fixture built the index before this body ran.
+    monkeypatch.setattr("kiro_crew.vector_memory._HAS_FAISS", False)
+    monkeypatch.setattr(seeded.vectors, "_faiss_index", None)
     assert _early_embed(seeded, QUERY) is True
     late_lesson = "Tag every deploy review with the release train."
     late_episode = "We deploy after the review once tabs are fixed."

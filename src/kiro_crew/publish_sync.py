@@ -879,7 +879,11 @@ async def push_version_by_slug(slug: str, *, force: bool = False) -> None:
 
 
 def _sharing_fields(
-    art: Artifact, provider: PublishProvider, visibility: str, shared_with: list[str]
+    art: Artifact,
+    provider: PublishProvider,
+    visibility: str,
+    shared_with: list[str],
+    notice: tuple[str, str] | None = None,
 ) -> dict[str, object]:
     """The publication patch for a visibility change, including a late-derived link.
 
@@ -894,14 +898,15 @@ def _sharing_fields(
     cleared. A destination that returned its own url at publish time keeps exactly that
     url, so this cannot corrupt a link it did not create.
     """
+    notice_text, notice_code = notice or ("", "")
     fields: dict[str, object] = {
         "visibility": visibility,
         "shared_with": shared_with,
         "last_error": "",
-        # A successful visibility change settles the rollout question, so a
-        # stale "still rolling out" notice must not persist.
-        "notice": "",
-        "notice_code": "",
+        # A successful visibility change settles any old notice. A provider can return a
+        # new one when the change completed but the resulting link needs a warning.
+        "notice": notice_text,
+        "notice_code": notice_code,
     }
     pub = art.publication
     if pub is not None and not pub.view_url and (visibility or "").strip().lower() == "public":
@@ -924,14 +929,14 @@ async def update_sharing(
     provider = _resolve_provider(art.publication.provider)
     if not await provider.ensure_ready():
         raise PublishUnavailableError(provider.install_hint)
-    await provider.update_sharing(
+    notice = await provider.update_sharing(
         external_id=art.publication.artifact_id,
         visibility=visibility,
         shared_with=shared_with,
     )
     updated = await asyncio.to_thread(
         lambda: store.update_publication(
-            slug, **_sharing_fields(art, provider, visibility, shared_with)
+            slug, **_sharing_fields(art, provider, visibility, shared_with, notice)
         )
     )
     assert updated.publication is not None  # just set above
@@ -962,7 +967,9 @@ async def unpublish(slug: str) -> None:
     if art.publication is None:
         raise NotPublishedError(f"artifact {slug} is not published")
     provider = _resolve_provider(art.publication.provider)
-    if not provider.reachable_for(external_id=art.publication.artifact_id):
+    # Off the loop: Personal Drive answers this with an STS subprocess that can take
+    # up to its 30 s timeout, and every other request waits on this loop meanwhile.
+    if not await asyncio.to_thread(provider.reachable_for, external_id=art.publication.artifact_id):
         raise PublishUnavailableError(
             "This artifact's destination is not reachable, so it is still marked "
             "published: the copy out there may still be served, and discarding the "
@@ -1225,7 +1232,9 @@ async def delete_for_artifact(art: Artifact) -> DeleteWithdrawal:
             exc,
         )
         return DeleteWithdrawal.UNREACHABLE
-    if not provider.reachable_for(external_id=art.publication.artifact_id):
+    # Off the loop for the same reason as in `unpublish`: the probe may block on a
+    # credential subprocess.
+    if not await asyncio.to_thread(provider.reachable_for, external_id=art.publication.artifact_id):
         # Not reachable from here, so the withdrawal cannot be attempted at all. This is
         # NOT the same as "there is nothing to withdraw": the copy may well still be
         # served. It is reported as UNREACHABLE and the CALLER refuses the delete, because

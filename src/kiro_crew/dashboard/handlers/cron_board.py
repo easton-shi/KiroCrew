@@ -107,10 +107,13 @@ async def api_crons(request: web.Request) -> web.Response:
         _audit_app_cron(app, "crons.list", "allowed", f"jobs={len(jobs)}")
     # A crewmate's goal check-ins are controlled only by its Goals tab switches,
     # so neither the Schedule page nor a crewmate's Schedules tab lists them;
-    # the store still runs them. Only those: every other managed job stays.
+    # the store still runs them. The stale-wake job is controlled only by its
+    # Feature preview switch, so it is left out too. Only those: every other
+    # managed job stays.
     from kiro_crew.dashboard.goal_reminder import is_reminder_job
+    from kiro_crew.dashboard.stale_wake import is_stale_wake_job
 
-    jobs = [j for j in jobs if not is_reminder_job(j)]
+    jobs = [j for j in jobs if not is_reminder_job(j) and not is_stale_wake_job(j)]
     now = time.time()
     tz_name, _ = get_local_tz()
     # What a job with no zone of its own follows, as the job form offers it: the
@@ -264,6 +267,9 @@ async def api_crons(request: web.Request) -> web.Response:
                 ),
                 "secret_env_pending_ts": (j.secret_env_pending_ts or None) if _owner_view else None,
                 "last_result": _r(j.last_result or "") or None,
+                # When `last_result` was produced (epoch), so a notification can
+                # tell whether the job's result is still the one it carries.
+                "last_result_ts": j.last_result_ts or None,
                 "last_error": _r(j.last_error or "") or None,
                 "is_running": live[j.id][1],
                 "running_since": live[j.id][2],

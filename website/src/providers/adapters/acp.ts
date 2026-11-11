@@ -226,11 +226,13 @@ export class AcpAdapter implements ProviderAdapter {
   }
 
   readonly labels: ProviderLabels = {
-    sessionProcess: 'ACP subprocess',
+    // Getters, not literals: these are shown inside translated copy, and the
+    // adapter is built once, so they must read the language at use time.
+    get sessionProcess() { return i18nT('providers.adapters.acp.session_process') },
     processCountLabel: 'acp_cli',
     configFile: 'kirocrew.json',
-    pluginRegistryName: 'Packages',
-    hooksSection: 'ACP Agent Hooks',
+    get pluginRegistryName() { return i18nT('providers.adapters.acp.plugin_registry_name') },
+    get hooksSection() { return i18nT('providers.adapters.acp.hooks_section') },
   }
 
   resolveAgentTemplate(agent: AgentBinding): string {
@@ -318,6 +320,7 @@ export class AcpAdapter implements ProviderAdapter {
         thisMonth: { sessions: s.this_month.sessions, messages: s.this_month.messages, toolCalls: s.this_month.tool_calls },
         avgMsgsPerSession: s.avg_msgs_per_session,
         refusedTranscripts: s.refused_transcripts ?? 0,
+        unreadableSessionDirs: s.unreadable_session_dirs ?? 0,
         dailyHistory: (s.daily_history || []).map((d: RawDailyHistory) => ({
           date: d.date,
           sessions: d.sessions,

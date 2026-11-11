@@ -88,6 +88,11 @@ class SpawnContext:
     member_context: bool = field(default=False, kw_only=True)
     """Capture native member context sources for session delivery deduplication."""
 
+    harness_pin: str = field(default="", kw_only=True)
+    """The session's own Bot pin as stored (``agents.<name>.acp_backend``), ``""`` for none.
+
+    Read by KAS's route rule 2 (:func:`kiro_crew.acp.kas_route.automatic_switch_allowed`)."""
+
     sandbox_mode: str = "auto"
     """The sandbox tier this spawn will use, as configured.
 
@@ -618,6 +623,9 @@ class HarnessAdapter(LaunchAdapter):
         session_key: str = "",
         worker_stub_names: frozenset[str] | None = None,
         engine_features: frozenset[str] = frozenset(),
+        session_cwd: str | Path | None = None,
+        ssh_auth_sock_forwarded: bool = False,
+        governance_app: str | None = None,
     ) -> SessionExtras:
         """Per-session payload for this host, for both session start paths.
 
@@ -631,8 +639,21 @@ class HarnessAdapter(LaunchAdapter):
         names of the stubs ``session/new`` injects for that session, from the
         caller's one overlay lookup. A host that projects nothing ignores it.
 
+        ``ssh_auth_sock_forwarded`` is the verdict the launch tail applied to the
+        running engine's own environment, for a host that starts the session's
+        stdio servers itself (KAS); False when no launch recorded one.
+
         ``engine_features`` is :func:`kiro_crew.acp.kas_engine_features.advertised`
         of this process's ``initialize`` answer. Only the KAS projection reads it.
+
+        ``session_cwd`` is the session's own working directory, which can differ
+        from *work_dir* (the runtime's) for a session opened in another checkout.
+        A host that reads workspace settings beside the session reads them there;
+        one that projects nothing ignores it.
+
+        ``governance_app`` is the app whose governance profile the session runs
+        under, or ``None`` when the caller cannot vouch for it. Only the KAS
+        projection reads it, for the profiles a translated allow meets.
         """
 
     def record_session_projection(self, handle: Any, custom_agents: Any, active_agent: str) -> None:
@@ -710,14 +731,16 @@ class HarnessAdapter(LaunchAdapter):
     ) -> tuple[dict[str, Any], str | None]:
         """The ``session/new`` / ``session/load`` params to send, and the agent to activate.
 
-        Asked after the runtime built the request and before it goes out. Every host
-        the backend table serves sends what the runtime built and activates the agent
-        the caller asked for, so this answer returns BOTH of the caller's objects
-        unchanged, and the request stays byte-identical to one built without this
-        seam. A host that places the session where Kiro Crew's agent does not exist
-        (:class:`~kiro_crew.acp.harness.kas_cloud.KasCloudSandboxHarness`) reshapes
-        the request and activates nothing. Raising ``AcpRuntimeError`` here refuses
-        the start before anything is sent.
+        Asked after the runtime built the request and before it goes out. This
+        default sends what the runtime built and activates the agent the caller asked
+        for, so it returns BOTH of the caller's objects unchanged, and the request
+        stays byte-identical to one built without this seam. KAS
+        (:class:`~kiro_crew.acp.harness.kas.KasHarness`) also names its injected
+        agent as the mode a ``session/new`` starts in, and still activates the
+        caller's agent. A host that places the session where Kiro Crew's agent does
+        not exist (:class:`~kiro_crew.acp.harness.kas_cloud.KasCloudSandboxHarness`)
+        reshapes the request and activates nothing. Raising ``AcpRuntimeError`` here
+        refuses the start before anything is sent.
         """
         return params, agent
 

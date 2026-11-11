@@ -214,10 +214,15 @@ def register_telemetry_parser(sub: _Commands) -> None:
     tel_parser = cli_help.add_command(sub, "telemetry")
     tel_sub = tel_parser.add_subparsers(dest="telemetry_action")
     tel_sub.add_parser(
-        "status", help="Show exactly what the anonymous beacon sends (and whether it will)"
+        "status",
+        help="Show whether local metric recording is on and exactly what the anonymous beacon sends",
     )
-    tel_sub.add_parser("disable", help="Turn the anonymous beacon off permanently")
-    tel_sub.add_parser("enable", help="Turn the anonymous beacon back on")
+    tel_sub.add_parser(
+        "disable", help="Turn local metric recording and the anonymous beacon off permanently"
+    )
+    tel_sub.add_parser(
+        "enable", help="Turn local metric recording and the anonymous beacon back on"
+    )
 
 
 def register_policy_parser(sub: _Commands) -> None:
@@ -242,13 +247,24 @@ def register_policy_parser(sub: _Commands) -> None:
     explain_parser = policy_sub.add_parser(
         "explain", help="Explain a tool/scope decision for a surface"
     )
-    explain_parser.add_argument("scope", help="Governed scope, e.g. 'commands' or 'mcp'")
-    explain_parser.add_argument("item", help="The item to evaluate, e.g. 'git push origin'")
+    explain_parser.add_argument("scope", nargs="?", help="Governed scope, e.g. 'commands' or 'mcp'")
+    explain_parser.add_argument(
+        "item", nargs="?", help="The item to evaluate, e.g. 'git push origin'"
+    )
     explain_parser.add_argument(
         "--session-key", default="cli_chat", help="Surface session key (default: cli_chat)"
     )
     explain_parser.add_argument("--agent", default="", help="Agent name (optional)")
     explain_parser.add_argument("--app", default="", help="App slug (optional)")
+    explain_parser.add_argument(
+        "--json", action="store_true", help="Print the answer as one JSON object"
+    )
+    explain_parser.add_argument(
+        "--batch",
+        metavar="FILE",
+        help="Explain each JSON Lines request in FILE ('-' for stdin): "
+        "scope, item, and optional session_key, agent, app; one JSON answer per line",
+    )
     profile_show = policy_sub.add_parser("profile", help="Show a profile by name")
     profile_show.add_argument("name", help="Profile file stem (without .json)")
     policy_sub.add_parser(

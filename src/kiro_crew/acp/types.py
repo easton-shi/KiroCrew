@@ -9,10 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # The ``_session/steering`` readers, re-exported for existing importers.
-from kiro_crew.acp.steering_wire import (  # noqa: F401
-    steering_advertised,
-    steering_outcome,
-)
+from kiro_crew.acp.steering_wire import steering_advertised, steering_outcome  # noqa: F401
 
 # Backend identifiers, the capability sets and the selectable registry live in the
 # leaf module
@@ -111,6 +108,7 @@ from kiro_crew.agent_sdk.host_auth import (  # noqa: E402,F401 - re-exported for
 from kiro_crew.recovery.ladder import (  # noqa: E402 - see the re-export note above
     SESSION_RECOVERY_MAX_ATTEMPTS,
 )
+from kiro_crew.rejection_reason import rejection_reason_text
 
 logger = logging.getLogger(__name__)
 
@@ -583,6 +581,13 @@ OUTCOME_CANCELLED = "cancelled"
 OPTION_ALLOW_ONCE = "allow_once"
 OPTION_ALLOW_ALWAYS = "allow_always"
 
+
+def rejection_reason_meta(reason: str) -> dict[str, Any] | None:
+    """The response ``_meta`` that carries *reason* to KAS, or None for none."""
+    text = rejection_reason_text(reason)
+    return {"kiro": {"rejectionReason": text}} if text else None
+
+
 # ── Stop Reasons ──
 
 STOP_REASON_CANCELLED = "cancelled"
@@ -937,10 +942,7 @@ def _command_from_tool_params(params: dict) -> str | None:
             # verbatim: a value whose repr still holds the real bytes stays
             # scannable. Imported here rather than at module scope because
             # ``_dispatch`` imports THIS module.
-            from kiro_crew.acp._dispatch import (
-                UNSERIALISABLE_SIBLING_VALUE,
-                _dumps_degraded,
-            )
+            from kiro_crew.acp._dispatch import UNSERIALISABLE_SIBLING_VALUE, _dumps_degraded
 
             rendered = _dumps_degraded(parameters, sort_keys=True)
             # A refusal leaves a placeholder where the payload was, and the
@@ -1135,6 +1137,11 @@ class AcpEvent:
     #: fails CLOSED (identity not counted as verified) instead of silently
     #: passing on non-emptiness alone.
     mcp_identity_trusted: bool = False
+    #: connection_mcp_identity: ``(server, tool)`` Kiro Crew's own pi gate extension
+    #: named in its nonce-bound envelope, from its registration table. Read ONLY by
+    #: the Crew-owned Connection approval (``crew_oauth_proxy.connection_identity``);
+    #: it never sets ``mcp_identity_trusted``, which other auto-approve gates read.
+    connection_mcp_identity: tuple[str, str] | None = None
     #: mcp_identity_unreadable: the frame PRESENTED an MCP identity half the
     #: name bound refused (``tool_surface.mcp_identity_unreadable``) -- on the
     #: preceding tool_call frame (carried per scoped toolCallId) or on this
@@ -1143,12 +1150,23 @@ class AcpEvent:
     #: deny that name is under cannot be checked, and every site that answers a
     #: permission request refuses it outright instead of judging it by title.
     mcp_identity_unreadable: bool = False
+    #: mcp_identity_unreadable_reason: which check set ``mcp_identity_unreadable``,
+    #: a key of ``deny_notice.UNREADABLE_IDENTITY_REASONS`` (the first that fired);
+    #: empty when the identity is readable. The refusal names it in its log line,
+    #: its audit row and the notice steered to the model.
+    mcp_identity_unreadable_reason: str = ""
     #: kas_builtin_ids: this permission event was built for a member of
     #: ``ACP_BACKENDS_PERMISSION_KIND_FROM_TOOL_CALL`` (KAS), so a bare built-in
     #: ``tool_name`` is a KAS id (``read_file``) that ``platform.tool_names``
     #: maps to its kiro-cli policy name. False on every other harness, whose
     #: bare ids the gate reads under their own name only.
     kas_builtin_ids: bool = False
+    #: takes_rejection_reason: a person's reason for rejecting this request reaches
+    #: the model. True only for a KAS request that offered a one-time Deny
+    #: (``reject_once``): KAS reads ``_meta.kiro.rejectionReason`` on that answer
+    #: and on no other. False everywhere else, so no surface asks for a reason
+    #: the backend would drop.
+    takes_rejection_reason: bool = False
     #: spec_granted_builtins: on a KAS session's OWN permission request (never a
     #: sub-session's), the built-ins the active agent's spec grants that the KAS
     #: policy keeps at ``ask`` (``AcpSessionHandle.kas_crew_answered``). Written by
@@ -1157,6 +1175,12 @@ class AcpEvent:
     #: tier and governance, and approves only a host-identified built-in it names.
     #: Empty everywhere else, which grants nothing.
     spec_granted_builtins: frozenset[str] = frozenset()
+    #: spec_hook_held: on the same requests, the ``@server/tool`` grants a
+    #: PreToolUse hook kept at ``ask`` (``AcpSessionHandle.kas_hook_held``), written
+    #: the same way. The gate's ``batch-guard-grant`` row approves one only for a
+    #: surface that says it fires the PreToolUse hooks on the request. Empty
+    #: everywhere else, which grants nothing.
+    spec_hook_held: frozenset[str] = frozenset()
     #: spec_granted_commands: on the same requests, the agent's
     #: ``toolsSettings.shell.allowedCommands`` as Python regexes
     #: (``AcpSessionHandle.kas_crew_answered_commands``), written the same way. The
@@ -1182,6 +1206,26 @@ class AcpEvent:
     #: resolves it against its workspace root. ``""`` elsewhere: a
     #: relative target is then not covered.
     spec_write_cwd: str = ""
+    #: spec_denied_grant: on the same requests, the grants the agent's spec gets only
+    #: once Crew checks its ``deniedCommands`` / write ``deniedPaths``, with those
+    #: denies (``AcpSessionHandle.kas_spec_denies``, a
+    #: ``platform.spec_denied_grant.SpecDeniedGrant``); ``None`` everywhere else.
+    spec_denied_grant: Any = None
+    #: spec_shell_readonly: on the same requests, whether the agent's spec sets
+    #: ``autoAllowReadonly: true`` beside ``denyByDefault``
+    #: (``AcpSessionHandle.kas_spec_shell_readonly``). The gate's
+    #: ``spec-shell-allowlist`` tier then lets a read-only command past, for the
+    #: read-only tier to answer. ``False`` everywhere else, which lifts nothing.
+    spec_shell_readonly: bool = False
+    #: spec_granted_paths: on the same requests, the agent's write ``allowedPaths``
+    #: as absolute globs (``AcpSessionHandle.kas_crew_answered_paths``). The
+    #: ``spec-builtin-grant`` tier approves a file write every target of which one
+    #: covers. Empty everywhere else, which grants nothing.
+    spec_granted_paths: tuple[str, ...] = ()
+    #: spec_granted_read_paths: the same for the agent's read ``allowedPaths``
+    #: (``AcpSessionHandle.kas_crew_answered_read_paths``), against the one target
+    #: of a ``read_file``. Empty grants nothing.
+    spec_granted_read_paths: tuple[str, ...] = ()
     #: native_child_call: a permission request a native KAS sub-agent made under
     #: this session's own id, told apart by the tool-call id its
     #: ``agentSubtaskId`` frame recorded (``_is_native_child_call``), or one
@@ -1301,6 +1345,26 @@ class AcpEvent:
                 if cmd:
                     return cmd
         return None
+
+    @property
+    def path_scope_trusted(self) -> bool:
+        """True when a file grant may be keyed on this event's tool and path.
+
+        A path grant (``trust_patterns.path_trust_target``) binds a built-in tool
+        name to the path in its arguments, so both must come from the harness's
+        own ``tool_call`` frame: the params from the cache (``raw_params_trusted``,
+        never the permission payload's inline copy), the built-in identity from the
+        cache (``mcp_identity_trusted`` with no server), and a resolved not-shell
+        classification.
+        """
+        return (
+            self.raw_params_trusted
+            and self.mcp_identity_trusted
+            and self.shell_classified
+            and not self.is_shell
+            and not self.mcp_server_name
+            and isinstance(self.raw_tool_params, dict)
+        )
 
     @property
     def child_low_fidelity(self) -> bool:
@@ -1713,10 +1777,11 @@ class AcpPromptStats:
         A turn that recorded exactly one reading more than it metered calls
         leaves out its first reading: that is the frame a session sends when it
         opens, which arrives ahead of the first call and measures no call. Any
-        other mismatch keeps every reading, and so does a turn that ended before
-        its metering frame arrived (a cancelled first turn then counts the
-        session-open reading). A turn that compacts mid-way records kiro-cli's
-        post-compaction report like a call's reading, so its sum is approximate.
+        other mismatch keeps every reading, and so does a turn whose metering
+        frame never arrived (a cancelled first turn whose frame missed the
+        bounded read after its answer then counts the session-open reading). A
+        turn that compacts mid-way records kiro-cli's post-compaction report
+        like a call's reading, so its sum is approximate.
         """
         context_sum = self.call_context_sum
         readings = self.call_readings

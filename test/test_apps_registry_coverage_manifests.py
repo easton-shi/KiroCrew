@@ -5,6 +5,7 @@ merging and enriching a manifest with its install status and trust fields.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import time
@@ -15,12 +16,21 @@ import pytest
 from apps_registry_coverage_helpers import _explicit_registry_execution_admission  # noqa: F401
 from apps_registry_coverage_helpers import cache_dir_fixture  # noqa: F401
 from apps_registry_coverage_helpers import _fake_sandbox, _FakeProc
+from stray_line_helpers import too_deep_to_decode
 
 from conftest import requires_symlinks
 from kiro_crew.apps import registry
 from kiro_crew.apps.registry_pipeline import manifests as manifests_mod
 
 # Manifest cache
+
+
+def _no_recursion(fn, *args):
+    """*fn*'s result; a ``RecursionError`` fails the test instead of erroring it."""
+    try:
+        return fn(*args)
+    except RecursionError:
+        pytest.fail(f"{fn.__name__} raised RecursionError on a nested body")
 
 
 class TestManifestCache:
@@ -45,6 +55,20 @@ class TestManifestCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not json", encoding="utf-8")
         assert registry._read_manifest_cache(self._DEMO) is None
+
+    def test_cache_nested_past_the_decoder_stack_reads_none(self, cache_dir):
+        """Nesting deep enough to exhaust the JSON decoder's stack is one more
+        malformed body: it reads as absent instead of raising RecursionError."""
+        path = registry._manifest_cache_path(self._DEMO)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(too_deep_to_decode(), encoding="utf-8")
+        assert _no_recursion(registry._read_manifest_cache, self._DEMO) is None
+
+    def test_external_cache_nested_past_the_decoder_stack_reads_none(self, cache_dir):
+        path = registry._external_registry_cache_path("mine")
+        assert path.parent == cache_dir
+        path.write_text(too_deep_to_decode(), encoding="utf-8")
+        assert _no_recursion(registry._read_external_registry_cache, "mine") is None
 
     def test_write_failure_is_swallowed(self, cache_dir, monkeypatch):
         def _boom(path, data):
@@ -323,10 +347,13 @@ def _tmp_clone_dir(monkeypatch, tmp_path, name: str = "clone") -> Path:
 
 class TestFetchAppManifest:
     @pytest.mark.asyncio
-    async def test_local_checkout_is_used_when_origin_and_branch_match(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("mark", [b"", codecs.BOM_UTF8], ids=["plain", "bom"])
+    async def test_local_checkout_is_used_when_origin_and_branch_match(
+        self, monkeypatch, tmp_path, mark
+    ):
         src = tmp_path / "app-sources" / "demo"
         src.mkdir(parents=True)
-        (src / "app.json").write_text(json.dumps({"name": "demo"}), encoding="utf-8")
+        (src / "app.json").write_bytes(mark + json.dumps({"name": "demo"}).encode("utf-8"))
         monkeypatch.setattr(registry, "app_source_dir", lambda n: src)
 
         async def _origin_matches(dest, git_url):
@@ -338,8 +365,13 @@ class TestFetchAppManifest:
         monkeypatch.setattr(registry, "_clone_origin_matches", _origin_matches)
         monkeypatch.setattr(registry, "_clone_branch_matches", _branch_matches)
 
+        # No remote: a local read that fails returns None instead of cloning.
         got = await registry._fetch_app_manifest(
-            "o/demo", "main", app_name="demo", git_url="https://github.com/o/demo.git"
+            "o/demo",
+            "main",
+            app_name="demo",
+            git_url="https://github.com/o/demo.git",
+            allow_remote=False,
         )
         assert got == {"name": "demo"}
 
@@ -396,11 +428,12 @@ class TestFetchAppManifest:
         assert got is None
 
     @pytest.mark.asyncio
-    async def test_successful_clone_reads_the_manifest(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize("mark", [b"", codecs.BOM_UTF8], ids=["plain", "bom"])
+    async def test_successful_clone_reads_the_manifest(self, monkeypatch, tmp_path, mark):
         monkeypatch.setattr(registry, "is_clone_host_trusted", lambda url: True)
         clone = _tmp_clone_dir(monkeypatch, tmp_path)
-        (clone / "app.json").write_text(
-            json.dumps({"name": "demo", "version": "2.0.0"}), encoding="utf-8"
+        (clone / "app.json").write_bytes(
+            mark + json.dumps({"name": "demo", "version": "2.0.0"}).encode("utf-8")
         )
         _fake_sandbox(monkeypatch, [_FakeProc(returncode=0)])
         got = await registry._fetch_app_manifest(

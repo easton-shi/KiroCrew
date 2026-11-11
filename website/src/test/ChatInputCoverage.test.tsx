@@ -721,11 +721,49 @@ describe('ChatInput context-usage popover', () => {
     expect(screen.queryByText('Remaining')).toBeNull()
   })
 
-  it('a mousedown outside the popover closes it', () => {
+  it('a press outside the popover closes it', async () => {
     renderWithProviders(<ChatInput {...base} contextPct={10} contextWindowTokens={100_000} />)
     fireEvent.click(screen.getByLabelText('Context usage'))
-    fireEvent.mouseDown(document.body)
+    // The shared Popover arms its outside-press listener one tick after it
+    // opens, and dismisses on the release of a press outside.
+    await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+    fireEvent.pointerDown(document.body)
+    fireEvent.click(document.body)
     expect(screen.queryByText('Remaining')).toBeNull()
+  })
+
+  it('says a slot with no reading yet is unknown rather than 0%', () => {
+    renderWithProviders(
+      <ChatInput {...base} contextPct={0} contextUnknown contextWindowTokens={200_000} showContextPct />,
+    )
+    const chip = screen.getByLabelText('Context usage')
+    expect(chip).toHaveAttribute('title', 'No context reading yet')
+    expect(screen.getByTestId('context-bar-unknown')).toBeInTheDocument()
+    expect(chip).toHaveTextContent('—')
+    expect(chip).not.toHaveTextContent('0%')
+    fireEvent.click(chip)
+    // Used and remaining have no measurement; the window is still known.
+    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(3)
+    expect(screen.queryByText('0%')).toBeNull()
+    expect(screen.getByText('200K')).toBeInTheDocument()
+  })
+
+  it('renders a measured 0% as a reading, not as unknown', () => {
+    renderWithProviders(<ChatInput {...base} contextPct={0} contextWindowTokens={200_000} showContextPct />)
+    const chip = screen.getByLabelText('Context usage')
+    expect(chip).toHaveAttribute('title', 'Context: 0%')
+    expect(screen.queryByTestId('context-bar-unknown')).toBeNull()
+    expect(chip).toHaveTextContent('0%')
+  })
+
+  it('portals the popover out of the composer, so the subagent bar cannot cover it', () => {
+    // Rendered inline, the card was capped by the composer's own stacking
+    // context and the subagent bar above the composer painted over it.
+    const { container } = renderWithProviders(<ChatInput {...base} contextPct={10} contextWindowTokens={100_000} />)
+    fireEvent.click(screen.getByLabelText('Context usage'))
+    const card = screen.getByTestId('context-usage-popover')
+    expect(container.contains(card)).toBe(false)
+    expect(card.closest('[data-radix-popper-content-wrapper]')?.parentElement).toBe(document.body)
   })
 
   it('renders no context chip at all when the host reports no percentage', () => {

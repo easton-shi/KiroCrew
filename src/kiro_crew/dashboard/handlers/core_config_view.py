@@ -474,7 +474,7 @@ async def api_kirocrew_config(request: web.Request) -> web.Response:
                     # or keeps while changing that mapping). The message names
                     # env-var keys only, never the value, and is the same
                     # instruction the CLI prints; nothing reached disk.
-                    return _deny(str(exc), 400, code="config_write_refused")
+                    return _deny(str(exc), 400, code=exc.code)
 
                 if _validation_error:
                     msg, status = _validation_error[0]
@@ -504,4 +504,55 @@ async def api_kirocrew_config(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "restart_required": restart_required})
 
     cfg = KiroCrewConfig.load()
-    return web.json_response(_masked_config_dict(cfg))
+    return web.json_response(_config_body(cfg, await _kas_in_use(cfg)))
+
+
+async def _kas_in_use(cfg: KiroCrewConfig) -> bool | None:
+    """``crewmate_harness.kas_runs_here`` off the event loop, or ``None`` when it fails.
+
+    Off the loop because on it a Bot's worker-spec answer is only the held one,
+    empty until a background refresh lands, so a read soon after boot would say
+    nothing runs on KAS for a Bot whose spec moves it there. ``None`` leaves the
+    field out: the dashboard then reads the main harness alone, and the config
+    read itself never fails over a hint.
+    """
+    from kiro_crew.crewmate_harness import kas_runs_here
+
+    try:
+        return await asyncio.to_thread(kas_runs_here, cfg)
+    except Exception:
+        logger.debug("could not tell whether anything runs on KAS", exc_info=True)
+        return None
+
+
+def _config_body(cfg: KiroCrewConfig, kas_in_use: bool | None = None) -> dict:
+    """The ``/api/config/kirocrew`` body: GET's, and every PATCH reply's.
+
+    Both must carry the same edition view, because the dashboard caches a PATCH
+    reply in place of the GET one. An LTS build (RFC D12) reports every Feature
+    Preview off, and lists in ``locked_controls`` the one browser-only control the
+    dashboard drops, ``debug_tools``. The preview lock itself reaches the dashboard
+    as ``lockedByPolicy`` on each preview path in ``GET /api/config/schema``. On
+    ``oss`` the field is absent and the body is the masked config as before.
+
+    *kas_in_use* (from :func:`_kas_in_use`) says whether any session here runs on
+    KAS, Bots included, so the dashboard shows the Kiro sign-in wherever something
+    signs in with it, not only on a KAS main harness. ``None`` leaves it out.
+    """
+    from kiro_crew.edition_locks import feature_previews, locked_controls
+
+    body = _masked_config_dict(cfg)
+    if kas_in_use is not None:
+        body["kas_in_use"] = kas_in_use
+    dashboard = body.get("dashboard")
+    if isinstance(dashboard, dict) and "feature_previews" in dashboard:
+        # Unchanged on oss; {} in LTS, whatever the Debug tools lock does.
+        dashboard["feature_previews"] = feature_previews(dashboard["feature_previews"])
+    locked = [c for c in locked_controls() if c in _DASHBOARD_LOCKS]
+    if locked:
+        body["locked_controls"] = locked
+    return body
+
+
+#: The locked controls the dashboard enforces in the browser and has no config path for.
+_DASHBOARD_LOCKS = ("debug_tools",)

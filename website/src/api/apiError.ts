@@ -104,10 +104,6 @@ export const isPermissionRefusal = (e: unknown): boolean => {
   return PERMISSION_REFUSAL_CODES.has(errorBodyCode(body))
 }
 
-/** {@link isPermissionRefusal} for the relay's teammate refusal of the app surface alone. */
-export const isRelayAppsRefusal = (e: unknown): boolean =>
-  isPermissionRefusal(e) && errorBodyCode((e as { body: string }).body) === 'relay_apps_teammate'
-
 /**
  * The `code` a raw refusal body names, or `''`. The body-level half of
  * {@link apiErrorCode}, for readers that run before an ApiError exists --
@@ -144,13 +140,36 @@ export const slotAttachedDetail = (body: string): string => {
   return lines.join('\n')
 }
 
+/**
+ * Is a rejected subagent retry a BENIGN, self-caused no-op rather than a failure
+ * to report? The one such case is the backend's `409 retry_superseded`: the run
+ * was already picked up by another retry or a `spawn_continue` (a double-click,
+ * two tabs), so retrying it again would double-run its task; the refusal is
+ * correct and there is nothing left to retry. Everything else (404 not found,
+ * 429 capacity, 503, an older gateway's codeless 409, a proxy's HTML) is a
+ * genuine failure worth a count. Shared by every "Retry failed" control so they
+ * count the same rejections.
+ */
+export const isBenignSupersededRetry = (reason: unknown): boolean =>
+  reason instanceof ApiError && reason.status === 409 && apiErrorCode(reason) === 'retry_superseded'
+
+/** The refusal a decide control raises when it names no request: nothing live
+ *  stands behind it, so it is answered like the server's own 404 for an
+ *  approval that is gone (`isTerminalApprovalRefusal`), in the one sentence
+ *  every approval surface shows for that. */
+export const noPendingApprovalError = (): ApiError =>
+  new ApiError(404, i18nT('components.approvalCard.approval_no_longer_pending'))
+
 /** True when an approval refusal is terminal — the approval itself is gone (404,
- *  or the endpoint's `no pending approval` 400). Duck-typed like {@link isNotFoundError}. */
+ *  the endpoint's `no pending approval` 400, or a 409 `already_resolved`: another
+ *  click settled it first, so every retry of this press gets the same answer).
+ *  Duck-typed like {@link isNotFoundError}. */
 export const isTerminalApprovalRefusal = (e: unknown): boolean => {
   if (typeof e !== 'object' || e === null) return false
   const r = e as { status?: unknown; message?: unknown; authRequired?: unknown }
   // 403 + re-auth leaves the approval live once the user signs back in.
   if (r.authRequired) return false
+  if (r.status === 409) return apiErrorCode(e) === 'already_resolved'
   return r.status === 404 || (r.status === 400 && r.message === 'no pending approval')
 }
 
@@ -185,6 +204,19 @@ export const isSlotCapError = (status: number, body: string): boolean => {
   return code === 'slot_cap_reached' || code === 'creator_slot_cap_reached'
 }
 
+/**
+ * The `code` a save answers when the settings file it writes was changed outside
+ * the app and that change still waits for review: the save would replace the
+ * change, so the gateway refuses it until the owner applies or discards it.
+ */
+export const FILE_PENDING_REVIEW_CODE = 'file_pending_review'
+
+/** Where that change is reviewed: the pending card on Settings > Security. */
+export const FILE_PENDING_REVIEW_URL = '/settings/security?highlight=security.config-pending'
+
+/** The message every such refusal shows, whichever save hit it. */
+export const filePendingReviewMessage = (): string => i18nT('api.client.file_pending_review')
+
 /** The first of `keys` a JSON object body sets, when it is a non-blank string, else `''`. */
 const jsonMessage = (trimmed: string, keys: readonly string[]): string => {
   if (!trimmed.startsWith('{')) return ''
@@ -206,9 +238,9 @@ const jsonMessage = (trimmed: string, keys: readonly string[]): string => {
  * reason in `error` (a channel limit, a full queue), which the user is shown
  * instead; the edge throttle carries only `message`, so it never matches.
  *
- * Returns `''` for a body carrying no human message, which is the signal every
- * caller already turns into `HTTP <status>` — so that wording stays decided in
- * one place. The raw body remains on `ApiError.body` for diagnostics.
+ * Returns `''` for a body carrying no human message: a caller with a sentence of
+ * its own supplies it, and the transport falls back to {@link statusErrText}.
+ * The raw body remains on `ApiError.body` for diagnostics.
  */
 export const friendlyErrText = (status: number, body: string): string => {
   const trimmed = body.trim()
@@ -224,6 +256,9 @@ export const friendlyErrText = (status: number, body: string): string => {
   if (isSlotCapError(status, body)) {
     return i18nT('api.client.too_many_open_sessions_http_429_close_old')
   }
+  // Shown in the reader's language, not the gateway's English sentence; the
+  // code decides, never the prose.
+  if (errorBodyCode(body) === FILE_PENDING_REVIEW_CODE) return filePendingReviewMessage()
   if (status === 429) {
     // Any other 429 the gateway sent names its reason in `error`; one with no
     // reason, like the tunnel edge's burst throttle, is a wait-and-retry.
@@ -241,6 +276,17 @@ export const friendlyErrText = (status: number, body: string): string => {
   if (looksLikeHtmlDocument(trimmed)) return ''
   return body
 }
+
+/**
+ * The message for a failure whose body carried no human message
+ * ({@link friendlyErrText} returned `''`). A proxy's own 502/503 page, sent
+ * while the gateway restarts or is unreachable, says the outage is temporary;
+ * anything else, a 504 included (the request may have run), reads `HTTP <status>`.
+ */
+export const statusErrText = (status: number, body: string): string =>
+  (status === 502 || status === 503) && looksLikeHtmlDocument(body)
+    ? i18nT('api.client.server_temporarily_unavailable_http_status', { status })
+    : `HTTP ${status}`
 
 /**
  * Read a failed `Response` and build the {@link ApiError} for it.
@@ -278,7 +324,7 @@ export async function toApiError(r: Response): Promise<ApiError> {
     : noteEdgeAuthChallenge(r.status, r.headers?.get?.('content-type') ?? null, body)
   const message = edgeChallengeMessage(edge)
     || friendlyErrText(r.status, body)
-    || `HTTP ${r.status}`
+    || statusErrText(r.status, body)
   // Every one of these needs a person: the gateway never saw the request, so a silent
   // retry a second later reproduces it whether a session lapsed or a firewall refused.
   const edgeChallenge = edge !== null

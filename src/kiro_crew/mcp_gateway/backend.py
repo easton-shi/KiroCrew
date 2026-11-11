@@ -81,7 +81,7 @@ from kiro_crew.mcp_gateway.backend_tmp import (
     sweep_backend_tmp,
     tmp_env,
 )
-from kiro_crew.mcp_gateway.backend_wire import _PendingRequest
+from kiro_crew.mcp_gateway.backend_wire import _keep_stderr_line, _PendingRequest
 from kiro_crew.mcp_gateway.image_budget import (  # noqa: F401
     line_may_carry_image_block,
     parse_image_bearing_frame,
@@ -101,6 +101,7 @@ from kiro_crew.sandbox import (
     format_declared_temp_refusals,
 )
 from kiro_crew.security import redact
+from kiro_crew.security.pem_scan import HEADER_PREFIX as _PEM_HEADER_PREFIX  # noqa: F401
 from kiro_crew.sel import SecurityEventLog  # noqa: F401
 
 if False:  # typing-only import guard
@@ -235,8 +236,7 @@ class Backend:
     # these into one fresh forwarded subscribe (first parker as forwarder,
     # the rest as riders); a refusal means the server retained the lease, so
     # they join the still-live entry locally.
-    _lease_replacement_subscribes: dict[str, list[tuple[str, Any]]] = field(
-        default_factory=dict)
+    _lease_replacement_subscribes: dict[str, list[tuple[str, Any]]] = field(default_factory=dict)
     # Identity-capable servers only: the caller whose subscribe the server
     # GRANTED, keyed ``(uri, stub_uuid)`` and recorded at response time — the
     # only moment the grant principal is known for certain. A release for a
@@ -244,8 +244,7 @@ class Backend:
     # teardown, and never a last-writer map: a claim rekey after the grant
     # makes both identify the wrong principal and revoke a co-tenant's live
     # subscription). Dropped when the grant is released or the entry pruned.
-    _grant_callers: dict[tuple[str, str], "CallerContext"] = field(
-        default_factory=dict)
+    _grant_callers: dict[tuple[str, str], "CallerContext"] = field(default_factory=dict)
     # URIs whose upstream subscription is known RETAINED with no subscriber
     # left to route to — a gateway-originated release was refused. Updates for
     # these are dropped WITHOUT recording a hazard: the frames are a
@@ -313,6 +312,19 @@ class Backend:
     # loop and (b) outlives shutdown if the process survives SIGKILL, leaking
     # its stderr pipe fd across LRU-eviction churn.
     _stderr_task: Optional[asyncio.Task[None]] = None
+    # The backend's last stderr lines as the server wrote them, each PEM block
+    # kept as one withheld line and each line bounded (``_keep_stderr_line``).
+    # The pump logs each line only at DEBUG, so this tail is what names a death
+    # the backend reached on its own (``_report_backend_exit``), which judges it
+    # whole before it logs any of it. Unredacted, so the repr leaves it out.
+    # Not a constructor argument: ``spawn_backend`` hands over the list its
+    # stderr drain fills.
+    _stderr_tail: list[str] = field(default_factory=list, init=False, repr=False)
+    # Set before the gateway itself ends the process: ``shutdown`` closing its
+    # stdin, ``recycle_if_idle``'s kill. A death seen after that is the
+    # gateway's, even when that act is cancelled or yields before it records a
+    # reason, so it is never named as the backend's own exit.
+    _gateway_ending: bool = field(default=False, init=False)
     # The process's start id, read once right after spawn, while nothing can
     # have reaped it yet. The out-of-band backend record publishes this, not a
     # fresh read at heartbeat time: by then the backend may have exited and
@@ -517,6 +529,7 @@ class Backend:
     _fail_init = _backend_handshake._fail_init
     _on_upstream_initialize = _backend_handshake._on_upstream_initialize
     # Liveness and teardown of a ``Backend``: ``kiro_crew.mcp_gateway.backend_liveness``.
+    _report_backend_exit = _backend_liveness._report_backend_exit
     _broadcast_backend_gone = _backend_liveness._broadcast_backend_gone
     _heartbeat_once = _backend_liveness._heartbeat_once
     _cancel_background_tasks = _backend_liveness._cancel_background_tasks
@@ -542,6 +555,42 @@ class Backend:
     _fetch_and_deliver_ui = _backend_mcp_apps._fetch_and_deliver_ui
     _read_ui_resource = _backend_mcp_apps._read_ui_resource
     _parse_ui_contents = _backend_mcp_apps._parse_ui_contents
+
+
+def _restore_default_work_dir(work_dir: str, server_name: str) -> None:
+    """Recreate the gateway's default work dir when it is *work_dir* and has vanished.
+
+    Every stub the rewriter writes registers ``workspace_root()/_default`` as its
+    ``--work-dir``, and only the rewrite pass creates it, so once it is removed
+    every cold spawn would fail on its cwd until a restart re-runs the rewrite.
+
+    The rule is deliberately narrow. *work_dir* arrives in a stub's register
+    frame, which in-sandbox code can forge, so only the gateway's own default is
+    ever created and never a path the frame chooses. Only the last directory is
+    created, so a workspace root that is gone (an unmounted volume) is not rebuilt
+    elsewhere and the spawn fails as it would without this. Every failure is
+    left to the spawn to report. Blocking, so the caller runs it off the loop.
+    """
+    if os.path.isdir(work_dir):
+        return
+    # Deferred: ``config.loader`` imports the rewriter's path helpers.
+    from kiro_crew.config.loader_locations import workspace_root
+
+    try:
+        default = workspace_root(create=False) / "_default"
+    except (OSError, ValueError):
+        return
+    if os.path.normcase(str(default)) != os.path.normcase(work_dir):
+        return
+    try:
+        default.mkdir(exist_ok=True)
+    except OSError:
+        return
+    logger.warning(
+        "MCP backend [%s]: recreated the missing default work dir %s",
+        server_name,
+        default,
+    )
 
 
 async def spawn_backend(
@@ -592,6 +641,8 @@ async def spawn_backend(
        ``~/.aws`` etc. is a known residual risk — backends that need AWS
        credentials read them from disk via ``ada`` / default credential
        chain, same as today's non-pooled topology).
+       The one key added back is the boot-time ``SSH_AUTH_SOCK``, for the
+       backends an operator names.
     3. Backends run as the invoking user's UID, same as kiro-cli —
        the pool does not elevate privileges.
 
@@ -624,6 +675,11 @@ async def spawn_backend(
     # server exits only when that relaunch can still work. Derived from the
     # key's own command, so PoolKey-safe like the marker.
     spawn_env[POOLED_RESPAWN_COMMAND_ENV] = command
+    # The child runs in ``work_dir``. The gateway's own default work dir is put
+    # back if it vanished; any other missing cwd fails the spawn below. This
+    # runs before the temp allocation, so a spawn cancelled while it waits
+    # holds no per-process temp dir that only the spawn-failure branch reclaims.
+    await asyncio.to_thread(_restore_default_work_dir, work_dir, pool_key.server_name)
     # Per-process temp containment. Safe re: the pooled-backend
     # PoolKey invariant for the same reason as the marker above -- the value
     # is derived from the key's own digest plus a token generated AFTER
@@ -730,14 +786,16 @@ async def spawn_backend(
         raise RuntimeError("subprocess pipes not attached")
 
     # Drain stderr in the background so a chatty backend can't fill the OS
-    # pipe buffer and wedge itself. We log every line at DEBUG. The task ref
+    # pipe buffer and wedge itself. We log every line at DEBUG and keep the
+    # last few for the warning that names the backend's own exit. The task ref
     # is stored on the Backend so shutdown() can cancel it
     # and release the stderr pipe fd; otherwise it is only weakly held and
     # leaks if the process outlives a SIGKILL.
     stderr_task: Optional[asyncio.Task[None]] = None
+    stderr_tail: list[str] = []
     if process.stderr is not None:
         stderr_task = asyncio.create_task(
-            _pump_stderr(process.stderr, pool_key.human_readable()),
+            _pump_stderr(process.stderr, pool_key.human_readable(), stderr_tail),
             name=f"mcp-gateway-backend-stderr-{process.pid}",
         )
 
@@ -755,6 +813,7 @@ async def spawn_backend(
     )
     backend._last_ping_response_mono = now  # cold-start: not insta-stale
     backend._stderr_task = stderr_task
+    backend._stderr_tail = stderr_tail
     backend.start_id = start_id
     if backend_tmp is not None:
         # Liveness anchor for the daemon-boot sweep: a SIGKILL'd daemon can
@@ -765,8 +824,17 @@ async def spawn_backend(
     return backend
 
 
-async def _pump_stderr(reader: asyncio.StreamReader, label: str) -> None:
-    """Consume a backend's stderr line by line at DEBUG level."""
+async def _pump_stderr(
+    reader: asyncio.StreamReader, label: str, tail: Optional[list[str]] = None
+) -> None:
+    """Consume a backend's stderr line by line at DEBUG level.
+
+    Each line also goes to ``tail`` when one is given, as the server wrote it,
+    and the tail keeps the last few (``_keep_stderr_line``) for the warning that
+    names the backend's own exit. That warning judges the kept lines together,
+    so they are not redacted one by one here.
+    """
+    in_pem_block = False
     while True:
         try:
             line = await reader.readline()
@@ -784,11 +852,11 @@ async def _pump_stderr(reader: asyncio.StreamReader, label: str) -> None:
         # (tracing/log crate output) and would otherwise flood INFO logs.
         # redact() so a secret printed to stderr (e.g. a token fragment in a
         # stack trace) does not land verbatim in the KiroCrew log.
-        logger.debug(
-            "backend[%s] stderr: %s",
-            label,
-            redact(line.decode("utf-8", errors="replace").rstrip()),
-        )
+        text = line.decode("utf-8", errors="replace").rstrip()
+        redacted = redact(text)
+        logger.debug("backend[%s] stderr: %s", label, redacted)
+        if tail is not None:
+            in_pem_block = _keep_stderr_line(tail, text, redacted, in_pem_block)
 
 
 # --------------------------------------------------------------------------- #
@@ -862,6 +930,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _LOST_SESSION_ERROR_MESSAGE,
         _REHANDSHAKE_RETRY_METHODS,
         _REHANDSHAKE_STUB_SENTINEL,
+        INITIALIZE_DEADLINE_REASON,
         _inject_inflight_capability,
         _is_lost_session_error,
         _parse_initialize_response,
@@ -881,6 +950,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     )
     from kiro_crew.mcp_gateway.backend_liveness import (  # noqa: F401
         _RECYCLE_EXEMPT_METHODS,
+        _STDERR_DRAIN_WAIT_SECS,
         HARD_WEDGE_CEILING_SECS,
         HEARTBEAT_PING_ID,
         HEARTBEAT_TIMEOUT_SECS,
@@ -914,6 +984,10 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
     from kiro_crew.mcp_gateway.backend_wire import (  # noqa: F401
         _JSONRPC_SERVER_ERROR,
         _MCP_IDENT_LOG_MAX,
+        _PEM_END_PREFIX,
+        _STDERR_PEM_WITHHELD,
+        _STDERR_TAIL_LINE_MAX,
+        _STDERR_TAIL_LINES,
         _TOOL_ERROR_LOG_MAX,
         _TOOL_ERROR_PRESCAN_MAX,
         _WRITE_DRAIN_TIMEOUT_SECS,

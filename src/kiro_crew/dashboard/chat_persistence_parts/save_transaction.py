@@ -48,6 +48,12 @@ if TYPE_CHECKING:
 
 def save_all_slots_to_history(state: DashboardState) -> None:
     """Save all active slots to history. Called on gateway shutdown."""
+    # Which chats hold an approval mode, for the next boot's notice that the
+    # restart ended it. First, because it is one small file and the per-slot
+    # saves below can use up the caller's shutdown deadline.
+    from kiro_crew.dashboard import chat_trust_restart
+
+    chat_trust_restart.record(state)
     for key in list(state._slots.keys()):
         # Re-fetch the occupant at each turn: this sequential pass takes real
         # disk time per slot while the loop can still recreate keys, and the
@@ -163,6 +169,8 @@ def _save_slot_to_history(
     after_commit_under_lock: Callable[[], None] | None = None,
     refuse_stale_empty_merge: bool = False,
     turn_timeout_override: tuple[int | None] | None = None,
+    autocompact_override: tuple[float | None] | None = None,
+    after_commit_on_transcript: Callable[[], None] | None = None,
     retired_rows: list[dict] | None = None,
     takeover_basis: TakeoverBasis | None = None,
 ) -> bool:
@@ -300,7 +308,7 @@ def _save_slot_to_history(
     if snapshot is None:
         return False
     window, queue_snapshot, queue_candidates, disk_older = snapshot
-    note_auth_key, history_key = _write_guards.routing_snapshot(slot)
+    note_auth_key, history_key, routed_binding = _write_guards.routing_snapshot(slot)
     if expected_history_key is not None and history_key != expected_history_key:
         # The caller authorized a write against a specific transcript and the
         # slot's routing moved before this snapshot (a rebind on the event
@@ -378,6 +386,9 @@ def _save_slot_to_history(
                 muted_override=muted_override,
                 after_commit_under_lock=after_commit_under_lock,
                 turn_timeout_override=turn_timeout_override,
+                autocompact_override=autocompact_override,
+                after_commit_on_transcript=after_commit_on_transcript,
+                routed_binding=routed_binding,
             )
             if refusal is not None:
                 logger.warning("Slot %s empty-window save refused: %s", slot.key, refusal)
@@ -552,6 +563,9 @@ def _save_slot_to_history(
                     mutes_opened_override=mutes_opened_override,
                     muted_override=muted_override,
                     turn_timeout_override=turn_timeout_override,
+                    autocompact_override=_metadata_line.autocompact_fold(
+                        slot, autocompact_override, routed_binding, history_key
+                    ),
                 )
             )
             meta_str = json.dumps(meta_line) + "\n"
@@ -598,20 +612,25 @@ def _save_slot_to_history(
                 )
                 return False
 
-            payload, frozen_prefix, foreign_lines = _transcript_merge.compose_payload(
-                state,
-                slot,
-                path,
-                history_key,
-                window,
-                disk_older,
-                meta_str,
-                rewrite=rewrite,
-                retired_rows=retired_rows,
+            payload, frozen_prefix, foreign_lines, drop_archives = (
+                _transcript_merge.compose_payload(
+                    state,
+                    slot,
+                    path,
+                    history_key,
+                    window,
+                    disk_older,
+                    meta_str,
+                    rewrite=rewrite,
+                    retired_rows=retired_rows,
+                )
             )
 
             _preserve_mtime: float | None = None
-            if closed and (slot.linked_session_key or is_channel_session_key(history_key)):
+            # A save that keeps this slot's own close is not channel activity either.
+            if (closed or _metadata_line.keeps_own_close(slot, closed, existing_meta)) and (
+                slot.linked_session_key or is_channel_session_key(history_key)
+            ):
                 # This slot shares its transcript with a channel, and the
                 # reconciler decides whether a close still stands by comparing
                 # the file's mtime against ``closed_at``: activity newer than the
@@ -649,8 +668,10 @@ def _save_slot_to_history(
                 )
             except BaseException:
                 # A failed save keeps nothing staged: its rows stay unjudged and
-                # the next save offers them again.
+                # the next save offers them again. Nor does it keep an archive of
+                # rows the unchanged transcript still holds.
                 _display_verdicts.take_pending()
+                drop_archives()
                 raise
             # The rows just written are judged for display once, now, on the
             # verdict worker (display_verdicts); a cheap hand-off, not the work.
@@ -660,9 +681,13 @@ def _save_slot_to_history(
             # flush -- which needs this same lock to serialize the slot -- cannot
             # observe the still-prior flag and overwrite the committed value.
             # This is the full-save twin of the empty-window merge's
-            # ``after_commit_under_lock`` hook; one or the other runs, never both.
+            # ``after_commit_under_lock`` hook; one save path or the other runs,
+            # never both. Both hooks run on every commit here; only the merge
+            # skips the first for a rebound slot (see ``merge_empty_window``).
             if after_commit_under_lock is not None:
                 after_commit_under_lock()
+            if after_commit_on_transcript is not None:
+                after_commit_on_transcript()
             _record_pending_memory_mode(pending_mode_target, _mode)
             # The write committed: the deferred-note drop records it retired
             # are now safe to consume (see ``build_full_line``). Discard is
@@ -770,6 +795,8 @@ async def save_slot_off_loop(
     muted_override: bool | None = None,
     after_commit_under_lock: Callable[[], None] | None = None,
     turn_timeout_override: tuple[int | None] | None = None,
+    autocompact_override: tuple[float | None] | None = None,
+    after_commit_on_transcript: Callable[[], None] | None = None,
     retired_rows: list[dict] | None = None,
     takeover_basis: TakeoverBasis | None = None,
     verdict_source: str | None = None,
@@ -944,6 +971,8 @@ async def save_slot_off_loop(
             muted_override=muted_override,
             after_commit_under_lock=after_commit_under_lock,
             turn_timeout_override=turn_timeout_override,
+            autocompact_override=autocompact_override,
+            after_commit_on_transcript=after_commit_on_transcript,
             retired_rows=retired_rows,
             takeover_basis=_basis,
         )

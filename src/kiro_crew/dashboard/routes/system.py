@@ -22,6 +22,10 @@ from kiro_crew.constants import env_flag_enabled
 from kiro_crew.dashboard import handlers
 from kiro_crew.dashboard.handlers import redaction as redaction_handlers
 from kiro_crew.dashboard.handlers import restart_gate as restart_gate_handlers
+from kiro_crew.dashboard.handlers.remote_control import (
+    api_remote_control_get,
+    api_remote_control_put,
+)
 from kiro_crew.dashboard.handlers.tunnel import api_tunnel_status
 from kiro_crew.dashboard.token_auth_paths import AGENT_HOOK_STATUS_PATH
 from kiro_crew.edition_locks import local_enable_locked
@@ -93,7 +97,7 @@ def register(app: web.Application) -> None:
     # Host-only: a strict internal path, re-asserted by the handler.
     app.router.add_post("/api/restart/when-idle", restart_gate_handlers.api_restart_when_idle)
     # Only expose the simulation endpoint in dev/debug environments. Both are local
-    # developer switches, which an enterprise build ignores (RFC D3).
+    # developer switches, which an LTS build ignores (RFC D3).
     _is_dev_env = os.environ.get("KIROCREW_HOME", "").endswith("-dev")
     if (_is_dev_env or env_flag_enabled("KIROCREW_DEV_MODE")) and not local_enable_locked(
         "developer_mode"
@@ -113,6 +117,7 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/tasks", handlers.api_tasks_list)
     app.router.add_get("/api/tasks/summary", handlers.api_tasks_summary)
     app.router.add_get("/api/tasks/{task_id}", handlers.api_task_detail)
+    app.router.add_get("/api/tasks/{task_id}/timeline", handlers.api_task_timeline)
     app.router.add_post("/api/tasks/{task_id}", handlers.api_task_action)
     app.router.add_post("/api/tasks/{task_id}/cancel", handlers.api_task_cancel)
     app.router.add_get("/api/usage/kiro", handlers.api_kiro_usage)
@@ -167,6 +172,15 @@ def register(app: web.Application) -> None:
     )
     app.router.add_delete(
         "/api/security/denied-commands/user/{id}", handlers.api_denied_command_user_delete
+    )
+    # Owner review of a hand-edited sealed keystone file: owner-gated, CSRF-guarded,
+    # never reachable by an agent or MCP tool (handlers/config_pending.py).
+    app.router.add_get("/api/security/config-pending", handlers.api_config_pending_list)
+    app.router.add_post(
+        "/api/security/config-pending/{leaf}/apply", handlers.api_config_pending_apply
+    )
+    app.router.add_post(
+        "/api/security/config-pending/{leaf}/discard", handlers.api_config_pending_discard
     )
     # Per-app third-party execution grants (Settings > Security opt-IN). The
     # blanket flag is a PUT on a fixed sub-path; grant/revoke are POST/DELETE on
@@ -242,6 +256,9 @@ def register(app: web.Application) -> None:
 
     # Tunnel status
     app.router.add_get("/api/tunnel/status", api_tunnel_status)
+    # Personal Remote Control: the setting, its notice and one-click off. Owner-only.
+    app.router.add_get("/api/remote-control", api_remote_control_get)
+    app.router.add_put("/api/remote-control", api_remote_control_put)
 
     # Session revocation (called by `kirocrew logout` CLI)
     app.router.add_post("/api/logout", handlers.api_logout)

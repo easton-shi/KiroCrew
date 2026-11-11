@@ -20,7 +20,7 @@ Two main pages, one set of data:
 |---|---|---|
 | **Discover** | `/apps` | The storefront: featured collections, a category rail, and every app the catalog offers. Install from here. |
 | **Library** | `/apps/library` | Your installed apps as an icon grid: enabled apps first, disabled ones in their own section below. Click a tile to open the app; its ⋯ menu holds the actions that apply to it in its current state. |
-| Detail | `/apps/detail/:name` | One app's description, screenshots, highlights, publisher and version. |
+| Detail | `/apps/detail/:name` | One app's description, screenshots, highlights, publisher and version. On the desktop app, another program can open it with `kirocrew://apps/detail/<name>`; the link shows the page and nothing more. |
 | Updates | `/apps/-/updates` | Every pending update in one worklist, with **Update All**. |
 | Migration | `/apps/migrate/:name` | Guidance for an app that used to ship inside the package and no longer does. |
 
@@ -199,7 +199,8 @@ kirocrew app uninstall my-app --purge-data   # deletes it permanently
 `update` is what the Update (or Sync) button on an app's page does, from a terminal: the
 running gateway stops the app, replaces its files, keeps its data and whether it
 was enabled, and starts it again. It needs the gateway running; with none to
-reach it changes nothing and says so.
+reach it changes nothing and says so. It is not available on native Windows; there,
+press Update (or Sync) on the app's page.
 
 Four more subcommands exist for people building apps rather than using them:
 `import` converts a manifest-declared plugin package into an app directory, `init`

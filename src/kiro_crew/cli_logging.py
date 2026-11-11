@@ -324,7 +324,7 @@ class _CliLogQueueHandler(QueueHandler):
 # thread, and none of them ever exec-over-self, so the atexit / bounded
 # force-exit drains cover every exit path they have. Short-lived CLI verbs
 # keep synchronous handlers: several replace the process via ``os.exec*``
-# (``logs -f`` -> tail/journalctl, ``config edit`` -> $EDITOR, ``pod exec``),
+# (``logs -f`` -> tail/journalctl, ``pod exec``),
 # which skips atexit and would strand queued records -- and none of them runs
 # an event loop, so the queue buys them nothing.
 _LONG_LIVED_COMMANDS = {"serve", "gateway", "chat", None}
@@ -398,6 +398,21 @@ async def drain_log_queue_before_hard_exit(timeout: float = 2.0) -> None:
         )
     except Exception:
         pass  # includes TimeoutError: reaching the exit is what matters
+
+
+def _chat_console_filter(record: logging.LogRecord) -> bool:
+    """Keep an internal ``kiro_crew`` record below ERROR off the ``kirocrew chat`` terminal.
+
+    That record is already in ``gateway.log``. Still echoed: chat's own warnings,
+    which explain a refusal its on-screen notice tells the user to fix; a
+    ``SECURITY:`` warning, which must stay loud (SEC-009); and a third-party record,
+    which reaches no file.
+    """
+    name = record.name
+    if record.levelno >= logging.ERROR or name == "kiro_crew.cli_chat":
+        return True
+    internal = name == "kiro_crew" or name.startswith("kiro_crew.")
+    return not internal or str(record.msg).startswith("SECURITY")
 
 
 def _setup_cli_logging(command: str | None, verbose: int) -> None:
@@ -571,6 +586,13 @@ def _setup_cli_logging(command: str | None, verbose: int) -> None:
         target_logger.addHandler(queue_handler)
     else:
         target_logger.addHandler(fh)
+
+    # The chat terminal is the conversation: without -v it shows our errors only.
+    # After the file handler, so a log file that cannot open keeps the full echo.
+    if command == "chat" and verbose == 0:
+        for handler in logging.getLogger().handlers:
+            if type(handler) is logging.StreamHandler:
+                handler.addFilter(_chat_console_filter)
 
     # Install secret redaction filter — scrubs Bearer tokens from all kiro_crew
     # log output before it reaches any handler. The filter also accepts literal

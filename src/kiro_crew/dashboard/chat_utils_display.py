@@ -76,7 +76,7 @@ BLOCKED_LINKS_ORDERED_KEY = "blocked_links_ordered"
 
 
 def variant_from_row(row: dict) -> dict:
-    """Stash a row as a variant, taking its redaction records with it.
+    """Stash a row as a variant, taking its redaction records and turn stats with it.
 
     The mirror of ``adopt_variant_text``: that one moves a variant onto the row,
     this one moves the row into the variant list. Both directions carry the
@@ -84,7 +84,8 @@ def variant_from_row(row: dict) -> dict:
     content is already redacted, so what they describe is gone and a rescan
     finds nothing to describe. A stash that dropped them would destroy the
     explanation for good, and the reader switching back would be handed a bare
-    placeholder with no way to learn what was removed.
+    placeholder with no way to learn what was removed. The turn stats (model,
+    credits, time) are that reply's own too, and nothing can measure them again.
     """
     entry = {"content": row.get("content", ""), "ts": row.get("ts", "")}
     meta = row.get("meta")
@@ -97,6 +98,10 @@ def variant_from_row(row: dict) -> dict:
                 entry[key] = records
         if entry.get("blocked_links") and meta.get(BLOCKED_LINKS_ORDERED_KEY) is True:
             entry[BLOCKED_LINKS_ORDERED_KEY] = True
+        stats = meta.get("turn_stats")
+        if isinstance(stats, dict):
+            # Redacted as the row's meta is when it is saved: the list is saved too.
+            entry["turn_stats"] = _redact_value(stats)
     return entry
 
 
@@ -153,13 +158,15 @@ def _variant_for_emit(variant: dict) -> dict:
             bounded["blocked_links"] = left
         else:
             bounded.pop("blocked_links", None)
-    return with_bounded_redaction_records(
-        {**bounded, "content": redact_display_content(bounded.get("content", ""))}
-    )
+    out = {**bounded, "content": redact_display_content(bounded.get("content", ""))}
+    # The page reads a reply's stats from its row, which a switch updates; the
+    # variant's copy is only there for the switch to put back.
+    out.pop("turn_stats", None)
+    return with_bounded_redaction_records(out)
 
 
 def adopt_variant_text(row: dict, variant: dict) -> None:
-    """Move a row onto one of its variants, text and redaction records together.
+    """Move a row onto one of its variants: text, redaction records and turn stats.
 
     A record describes ONE text: it names what was removed from a placeholder
     standing in that text. A caller that takes a variant's content without its
@@ -185,6 +192,21 @@ def adopt_variant_text(row: dict, variant: dict) -> None:
         meta.pop(BLOCKED_LINKS_ORDERED_KEY, None)
         if meta.get("blocked_links") and variant.get(BLOCKED_LINKS_ORDERED_KEY) is True:
             meta[BLOCKED_LINKS_ORDERED_KEY] = True
+    # The page reads a row's turn stats as the end of its turn, so they move only
+    # on the row its turn stamped, which is when the newest variant carries them.
+    # The first row of a reply that ran tools carries none and stays unstamped; a
+    # list saved before variants carried stats keeps the row's stats as they are.
+    variants = row.get("variants")
+    newest = variants[-1] if isinstance(variants, list) and variants else None
+    if isinstance(newest, dict) and isinstance(newest.get("turn_stats"), dict):
+        stats = variant.get("turn_stats")
+        if isinstance(stats, dict):
+            if not isinstance(meta, dict):
+                meta = {}
+                row["meta"] = meta
+            meta["turn_stats"] = dict(stats)
+        elif isinstance(meta, dict):
+            meta.pop("turn_stats", None)
     if isinstance(meta, dict) and not meta:
         row.pop("meta", None)
 
@@ -367,13 +389,21 @@ _NO_BASE = object()
 
 
 def _display_redaction_cache_key(
-    text: str, base: object = _NO_BASE, exempt_hosts: frozenset[str] | None = None
+    text: str,
+    base: object = _NO_BASE,
+    exempt_hosts: frozenset[str] | None = None,
+    *,
+    token_param_prefixes: tuple[str, ...] | None = None,
 ) -> tuple[_DisplayRedactionKey, int]:
     """Digest the exact string entering the battery together with the exempt sets it reads.
 
     ``exempt_hosts`` is the caller's one read of the platform set and the scoped
     override, the same snapshot it hands the battery, so the key names the set
     the output is computed under. ``None`` reads the set here.
+
+    ``token_param_prefixes`` is the caller's one read of the pass-4 prefix set,
+    the same snapshot it hands the battery, so the key names the set the output
+    is computed under. ``None`` reads the set here.
 
     The key is fixed-size: a 32-byte digest and the input byte length. The host set
     is sorted and folded into the MAC input behind a NUL separator (a host never
@@ -389,7 +419,9 @@ def _display_redaction_cache_key(
     if exempt_hosts is None:
         exempt_hosts = _exempt_exact_hosts() | current_scoped_exempt_hosts()
     hosts = "\0".join(sorted(exempt_hosts)).encode("utf-8", errors="surrogatepass")
-    prefixes = _token_param_exempt_prefixes()
+    prefixes = token_param_prefixes
+    if prefixes is None:
+        prefixes = _token_param_exempt_prefixes()
     tail = hosts
     if prefixes:
         tail += b"\x01" + "\0".join(prefixes).encode("utf-8", errors="surrogatepass")
@@ -522,15 +554,20 @@ def _redact_for_display(text: str) -> str:
     (:func:`_display_scope_changes_battery`) the battery runs uncached: no cache
     and no stored verdict is read or written.
 
-    The exempt-host set is read ONCE and that snapshot feeds both the key and
-    the battery. A second read inside the battery could see another set (the
-    platform read moves mid-process and degrades a failure to the empty set),
-    and the cache would store one set's output under another set's key.
+    The exempt-host set and the pass-4 token-parameter prefix set are each read
+    ONCE and those snapshots feed both the key and the battery. A second read
+    inside the battery (the host set in ``redact_exfiltration_urls``, the prefix
+    set in ``redact_credentials``) could see another set -- the platform read
+    moves mid-process and degrades a failure to the empty set -- and the cache
+    would store one set's output under another set's key.
     """
     scoped = _display_scope_changes_battery()
     stored, base = (None, None) if scoped else _display_verdicts.active()
     hosts = _exempt_exact_hosts() | current_scoped_exempt_hosts()
-    key, input_bytes = _display_redaction_cache_key(text, base, hosts)
+    prefixes = _token_param_exempt_prefixes()
+    key, input_bytes = _display_redaction_cache_key(
+        text, base, hosts, token_param_prefixes=prefixes
+    )
     ck = _clean_verdict_key(key)
     tag = key[0]
     if not scoped:
@@ -559,7 +596,7 @@ def _redact_for_display(text: str) -> str:
             _remember_redacted(key, input_bytes, verdict)
             return verdict
 
-    redacted = display_battery(text, exempt_hosts=hosts)
+    redacted = display_battery(text, exempt_hosts=hosts, token_param_prefixes=prefixes)
     if scoped:
         return redacted
     if redacted == text:
@@ -1103,6 +1140,24 @@ def with_allowed_links_restored(m: dict) -> dict:
     return {**m, "content": new_text, "meta": new_meta}
 
 
+def _carry_row_mid(meta: dict, msg: dict) -> dict:
+    """*meta* (parsed from a row's ``cls``) with the row's own ``mid`` kept.
+
+    A row whose structured fields live in ``cls`` (a permission row) keeps its
+    delivery identity, ``mid``, in the stored ``meta`` dict instead. The live
+    ``chat_message`` frame merges the two, so a card rendered live carries the
+    mid a native decide is bound by; a reader that rebuilt meta from ``cls``
+    alone dropped it, and every card rendered after a reload (or over the
+    stream) then named no request and refused its own presses. Only the mid is
+    carried: the rest of the stored meta keeps its own handling on each path.
+    """
+    stored = msg.get("meta")
+    mid = stored.get("mid") if isinstance(stored, dict) else None
+    if isinstance(mid, str) and mid and "mid" not in meta:
+        return {**meta, "mid": mid}
+    return meta
+
+
 def _prepare_messages_scoped(messages: list[dict], running: bool, *, live_child: str) -> list[dict]:
     """:func:`_prepare_messages` inside its allowed-host scope."""
     out: list[dict] = []
@@ -1170,11 +1225,8 @@ def _prepare_messages_scoped(messages: list[dict], running: bool, *, live_child:
             # elicitation rows only (the two the approval registry binds, and
             # the two whose resolution frame names a `mid`), so every other
             # row's wire meta stays exactly as before.
-            stored = m.get("meta")
-            stored_mid = stored.get("mid") if isinstance(stored, dict) else None
-            keep_mid = isinstance(stored_mid, str) and stored_mid and "mid" not in meta
-            if role in ("permission", "elicitation") and keep_mid:
-                meta = {**meta, "mid": stored_mid}
+            if role in ("permission", "elicitation"):
+                meta = _carry_row_mid(meta, m)
             msg_out["meta"] = _expire_dead_child_oauth_meta(
                 role, _redact_meta_for_role(role, meta), live_child
             )

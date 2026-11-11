@@ -77,6 +77,64 @@ class TestEmbedRateLimiter:
         # acquire() did real work rather than returning early.
         assert limiter._tokens == tokens_before - 1.0
 
+    def test_concurrent_waiters_get_one_token_each(self):
+        """Callers that wait together on an empty bucket are let through one per
+        refill, not all at once after the first wait."""
+        from types import SimpleNamespace
+
+        import kiro_crew.knowledge.ingestion as ing_mod
+        from kiro_crew.knowledge.ingestion import EmbedRateLimiter
+
+        # A fake clock and a fake sleep that only the driver below wakes, at
+        # the earliest deadline, so the waiters' sleeps overlap as real ones do.
+        clock = [0.0]
+        fake_time = SimpleNamespace(monotonic=lambda: clock[0])
+        sleepers: list[tuple[float, asyncio.Future]] = []
+
+        async def fake_sleep(secs):
+            fut = asyncio.get_running_loop().create_future()
+            sleepers.append((clock[0] + secs, fut))
+            await fut
+
+        async def turn():
+            fut = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(fut.set_result, None)
+            await fut
+
+        times: list[float] = []
+
+        async def one(limiter):
+            await limiter.acquire()
+            times.append(clock[0])
+
+        async def main():
+            with patch.object(ing_mod, "_time", fake_time):
+                limiter = EmbedRateLimiter(rate_limit=60)  # one token per second
+                limiter._tokens = 0.0
+                with patch(
+                    "kiro_crew.knowledge.ingestion.asyncio.sleep",
+                    fake_sleep,  # flake-ok: a driver-woken future, no wall clock is read
+                ):
+                    tasks = [asyncio.ensure_future(one(limiter)) for _ in range(5)]
+                    for _ in range(20):
+                        # Advance the clock only once every unfinished waiter is
+                        # parked in its sleep (bounded, so a bug fails, not hangs).
+                        for _ in range(1000):
+                            if len(sleepers) == sum(not t.done() for t in tasks):
+                                break
+                            await turn()
+                        if all(t.done() for t in tasks):
+                            break
+                        wake = min(deadline for deadline, _ in sleepers)
+                        clock[0] = wake
+                        for item in [s for s in sleepers if s[0] == wake]:
+                            sleepers.remove(item)
+                            item[1].set_result(None)
+                    assert all(t.done() for t in tasks)
+
+        asyncio.run(main())
+        assert sorted(times) == [1.0, 2.0, 3.0, 4.0, 5.0]
+
     def test_rate_limit_setter_resets_bucket(self):
         from kiro_crew.knowledge.ingestion import EmbedRateLimiter
         limiter = EmbedRateLimiter(rate_limit=1)
@@ -846,6 +904,11 @@ class TestBackgroundDeferralStaysRetryable:
             def __init__(self):
                 self.db = _DB()
 
+            def merge_source_properties(self, source_id, *, sync_status=None, **_delta):
+                # The deferral's status write, recorded like the UPDATE it issues.
+                self.db.execute(
+                    "UPDATE sources SET sync_status = ? WHERE id = ?", (sync_status, source_id))
+
         return _Store()
 
     _TERMINAL_STATES = ("pending", "error", "synced")
@@ -881,6 +944,116 @@ class TestBackgroundDeferralStaysRetryable:
         asyncio.run(kh._ingest_local_file_task(pipeline, store, str(doc), "src-1"))
 
         assert self._states(store) == ["pending"], store.db.statements
+
+    def test_a_deferred_row_says_why_until_a_reasonless_pending_write(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from kiro_crew.dashboard.handlers import knowledge as kh
+        from kiro_crew.knowledge.ingestion import ImportChunkBudgetError
+        from kiro_crew.knowledge.store import KnowledgeStore
+
+        doc = tmp_path / "doc.md"
+        doc.write_text("body", encoding="utf-8")
+        store = KnowledgeStore(str(tmp_path / "k.db"))
+        try:
+            sid = store.add_source(name="doc", source_type="local_file", uri=str(doc))
+            pipeline = SimpleNamespace(ingest_file=AsyncMock(
+                side_effect=ImportChunkBudgetError(budget=50, window_secs=60.0, spent=60)))
+
+            def _row():
+                row = store.db.execute(
+                    "SELECT sync_status, properties FROM sources WHERE id = ?", (sid,)).fetchone()
+                return row["sync_status"], json.loads(row["properties"] or "{}")
+
+            asyncio.run(kh._ingest_local_file_task(pipeline, store, str(doc), sid))
+            status, props = _row()
+            assert (status, props.get("pending_reason")) == ("pending", "import_budget")
+
+            async def _busy(*_a, **_k):
+                raise kh._PathProbeBusy()
+
+            monkeypatch.setattr(kh, "_run_path_probe", _busy)
+            asyncio.run(kh._ingest_local_file_task(pipeline, store, str(doc), sid))
+            status, props = _row()
+            assert status == "pending" and "pending_reason" not in props, props
+        finally:
+            store.close()
+
+    def test_web_page_deferral_says_why(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        from kiro_crew.dashboard.handlers import knowledge as kh
+        from kiro_crew.knowledge.ingestion import ImportChunkBudgetError
+        from kiro_crew.knowledge.store import KnowledgeStore
+        from kiro_crew.knowledge.url_fetch import FetchedPage
+
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+        monkeypatch.setattr(kh, "_doc_ingest_hosts", lambda: ["example.com"])
+        monkeypatch.setattr(kh, "fetch_page", AsyncMock(
+            return_value=FetchedPage("https://example.com/a", "body", ".md")))
+        store = KnowledgeStore(str(tmp_path / "k.db"))
+        try:
+            sid = store.add_source(name="a", source_type="url", uri="https://example.com/a")
+            pipeline = SimpleNamespace(ingest_file=AsyncMock(
+                side_effect=ImportChunkBudgetError(budget=50, window_secs=60.0, spent=60)))
+
+            asyncio.run(kh._background_url_sync(sid, "https://example.com/a", "a", store, pipeline))
+
+            row = store.db.execute(
+                "SELECT sync_status, properties FROM sources WHERE id = ?", (sid,)).fetchone()
+            reason = json.loads(row["properties"] or "{}").get("pending_reason")
+            assert (row["sync_status"], reason) == ("pending", "import_budget")
+        finally:
+            store.close()
+
+    def test_research_findings_deferral_says_why(self, tmp_path):
+        from types import SimpleNamespace
+
+        from kiro_crew.apps.builtins.auto_research.campaign import publication
+        from kiro_crew.knowledge.ingestion import ImportChunkBudgetError
+        from kiro_crew.knowledge.store import KnowledgeStore
+
+        findings = str(tmp_path / "findings.md")
+        store = KnowledgeStore(str(tmp_path / "k.db"))
+        try:
+            sid = publication._add_source_marked_syncing(store, "Research: q", findings)
+            pipeline = SimpleNamespace(ingest_file=AsyncMock(
+                side_effect=ImportChunkBudgetError(budget=50, window_secs=60.0, spent=60)))
+
+            asyncio.run(publication._ingest_findings(pipeline, store, findings, sid, "c1"))
+
+            row = store.db.execute(
+                "SELECT sync_status, properties FROM sources WHERE id = ?", (sid,)).fetchone()
+            reason = json.loads(row["properties"] or "{}").get("pending_reason")
+            assert (row["sync_status"], reason) == ("pending", "import_budget")
+        finally:
+            store.close()
+
+    def test_a_bundle_import_does_not_carry_the_reason(self, tmp_path):
+        from kiro_crew.knowledge.store import KnowledgeStore
+
+        exporter = KnowledgeStore(str(tmp_path / "exporter.db"))
+        importer = KnowledgeStore(str(tmp_path / "importer.db"))
+        try:
+            uri = "https://example.com/a"
+            sid = exporter.add_source(name="a", source_type="url", uri=uri)
+            # Deferred once, then synced: the synced stamp leaves the key behind.
+            exporter.merge_source_properties(
+                sid, set_keys={"pending_reason": "import_budget", "kept": 1},
+                sync_status="pending")
+            exporter.db.execute("UPDATE sources SET sync_status = 'synced' WHERE id = ?", (sid,))
+            exporter.db.commit()
+
+            importer.import_bundle(exporter.export_all())
+
+            row = importer.db.execute(
+                "SELECT sync_status, properties FROM sources WHERE uri = ?", (uri,)).fetchone()
+            props = json.loads(row["properties"] or "{}")
+            assert row["sync_status"] == "pending"
+            assert "pending_reason" not in props and props.get("kept") == 1, props
+        finally:
+            exporter.close()
+            importer.close()
 
     def test_local_file_ingest_still_errors_on_a_real_failure(self, tmp_path):
         from types import SimpleNamespace

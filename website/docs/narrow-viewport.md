@@ -109,6 +109,10 @@ pointer precision, and hover capability is a separate question. The `::after` ca
 past the nearest `overflow: hidden` ancestor, since a clipped part of a box is not
 hit-testable, so a host inside such a wrapper must lift the clip under the same query.
 
+**An in-flow drag handle beside tappable content needs a pressed style.** That snapping also
+takes a touch landing ON a handle that has only `hover:` styles (they do not apply on touch);
+give its bar a `group-active/<name>:` style, as `ResizeHandle` does.
+
 **`overflow: hidden` on ANY ancestor kills `position: sticky` — use `overflow: clip`.**
 Same family: a `transform` on an ancestor re-anchors `position: fixed` children, and
 `align-self: start` is the most common silent sticky failure in flex and grid. A sticky
@@ -555,6 +559,15 @@ therefore commits its own target the moment it starts, and the prop is adopted w
 CHANGES, which is the authority for a panel opened by tap rather than by gesture. Both
 halves are load-bearing: without the first, re-opening is declined; without the second, a
 hamburger-opened drawer cannot be dragged shut.
+
+**A settle a takeover ended never reports its arrival, even one whose time was up.** On
+the main-thread path, framer's `stop()` COMPLETES an animation whose duration has already
+passed, and `animate()` delivers that `onComplete` a microtask later, after the new
+gesture has committed. A busy main thread is exactly when that happens, and the stale
+arrival slid the side panel back open over a closing drag (#29908). Both main-thread
+settles, `animateDrawer`'s and the trackpad's `settleTrackpadDrag`, therefore note
+framer's `onStop` (it runs inside `stop()`, before that late `onComplete`) and drop an
+arrival that comes after it.
 
 **A MODAL LAYER owns every touch inside it, read from its `role`.** A dialog is not
 necessarily portaled out of the shell: the changelog and update-error overlays are plain

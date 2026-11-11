@@ -23,6 +23,7 @@ import shutil
 import stat
 import struct
 import sys
+import time
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from kiro_crew.platform_compat_links import (
     _WIN_OPEN_EXISTING,
     is_link_or_junction,
     lstat_is_name_surrogate,
+    unlink_link_or_junction,
 )
 from kiro_crew.platform_compat_native import IS_LINUX, IS_MACOS, IS_POSIX, IS_WINDOWS
 
@@ -605,15 +607,83 @@ def rmtree_force(path: str | os.PathLike) -> bool:
     return not os.path.lexists(path)
 
 
+#: Windows sharing (32) and lock (33) violations: another process holds a file
+#: open. Both clear once that process closes the handle.
+_SHARING_VIOLATION_WINERRORS = (32, 33)
+#: Bounded wait for a holder to let go: about three seconds in total, long
+#: enough for a just-stopped process to close its file, short enough that a
+#: holder that never releases still fails the delete promptly.
+_RMTREE_MAX_ATTEMPTS = 15
+_RMTREE_BACKOFF_SECONDS = 0.2
+
+
+def remove_with_retry(path: str | os.PathLike, *, retry_hint: str) -> None:
+    """Remove a file or a directory tree, retrying the Windows sharing-violation window.
+
+    On Windows, deleting a file another process holds open raises
+    ``PermissionError`` with ``winerror`` 32 (or 33 for a byte-range lock), so
+    an editor or a scanner with one file open fails the whole delete. Each retry
+    resumes on whatever is left, so the path goes as soon as the holder
+    releases. Every other error, and every error on POSIX (which unlinks open
+    files), propagates on the first attempt. A link or junction is unlinked,
+    never traversed.
+
+    The retry sleeps, so it is skipped on a thread running an event loop, the
+    same gate :func:`kiro_crew.atomic_write.replace_with_retry` uses.
+
+    When the budget runs out the raised error names the held file, followed by
+    *retry_hint* telling the user what to close before trying again.
+    """
+    # atomic_write imports platform_compat, so this import cannot sit at module top.
+    from kiro_crew.atomic_write import on_event_loop
+
+    for attempt in range(_RMTREE_MAX_ATTEMPTS):
+        try:
+            if is_link_or_junction(path):
+                unlink_link_or_junction(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in _SHARING_VIOLATION_WINERRORS:
+                raise
+            held = exc.filename or str(path)
+            if attempt == _RMTREE_MAX_ATTEMPTS - 1 or on_event_loop():
+                raise PermissionError(
+                    exc.errno, f"{held} is held open by another process. {retry_hint}"
+                ) from exc
+            logger.debug(
+                "delete contended at %s; retrying (attempt %d/%d)",
+                held,
+                attempt + 1,
+                _RMTREE_MAX_ATTEMPTS,
+            )
+            time.sleep(_RMTREE_BACKOFF_SECONDS)
+
+
 _WIN_FILE_SHARE_READ_WRITE_DELETE = 0x00000001 | 0x00000002 | 0x00000004
 
 
-def open_log_file_for_tail(path: str | os.PathLike) -> int:
-    """Open a binary read fd without blocking the log writer's rename/rotation.
+def open_file_for_shared_read(path: str | os.PathLike) -> int:
+    """Open a binary read fd that every other holder of the file can share.
 
-    Windows CRT opens omit FILE_SHARE_DELETE. This separate log-only helper
-    permits rotation even during a read; security pinning helpers must not.
-    The caller owns the returned descriptor and must close it.
+    Windows CRT opens grant FILE_SHARE_READ | FILE_SHARE_WRITE and omit
+    FILE_SHARE_DELETE, so they are a sharing violation against any program
+    that holds the file with delete access: Word and Excel hold every open
+    document that way, and a log writer that rotates by rename does too.
+    ``CreateFileW`` here grants all three, so the open succeeds whenever the
+    holder shares reading, and this handle never blocks that holder's own
+    rename, replace or delete. A holder that does not share reading still
+    refuses the open; the raised ``OSError`` carries its ``winerror`` (32 or
+    33, :data:`_SHARING_VIOLATION_WINERRORS`) for the caller to report.
+
+    It follows a link at the name, as ``os.open`` does, so a caller that must
+    refuse one checks the name first. Never use it to pin a path: another
+    process can rename or delete the name while this handle is held. POSIX
+    has no share modes; it is a plain read-only open there. The caller owns
+    the returned descriptor and must close it.
     """
     if IS_POSIX:
         return os.open(os.fspath(path), os.O_RDONLY)

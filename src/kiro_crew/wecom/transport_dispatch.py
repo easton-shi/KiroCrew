@@ -31,12 +31,14 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from kiro_crew.agent_switch_command import LiveDefaultAgent
 from kiro_crew.config import live
 from kiro_crew.config.sections import _normalize_threshold_pair
 from kiro_crew.history import mint_row_mid
 from kiro_crew.messaging.attachments import append_attachment_context
 from kiro_crew.messaging.attachments import cleanup as cleanup_attachments
 from kiro_crew.messaging.commands import (
+    COMPACT_ACCOUNT_CHANGED_REPLY_ZH,
     COMPACT_TIMED_OUT_REPLY_ZH,
     compact_unsupported_backend,
     compact_unsupported_reply_zh,
@@ -81,6 +83,7 @@ from kiro_crew.start_priority import person_priority
 from kiro_crew.wecom.attachments import process_wecom_attachments
 from kiro_crew.wecom.commands import (
     ConversationState,
+    _after_leading_mention,
     build_help_text,
     build_override_usage,
     is_bare_mid_turn_override,
@@ -106,13 +109,6 @@ if TYPE_CHECKING:
     from kiro_crew.wecom.transport import WeComTransport
 
 logger = logging.getLogger(__name__)
-
-
-# Canonical kiro-cli agent fallback so WeCom sessions load kirocrew-core
-# (spawn_run etc.) instead of kiro-cli's bare built-in default when neither an
-# explicit override nor agent.default_agent is configured. Mirrors the Slack /
-# Telegram paths' _DEFAULT_KIROCREW_AGENT.
-_DEFAULT_KIROCREW_AGENT = "kirocrew"
 
 
 class WeComDispatcher:
@@ -147,7 +143,8 @@ class WeComDispatcher:
         # reason as ``client``); the config applier pushes reloaded
         # authorization fields at it.
         self.transport: "WeComTransport | None" = None
-        self._conv = ConversationState(seed_fn=self._seed_gen)
+        self._default_agent = LiveDefaultAgent()
+        self._conv = ConversationState(seed_fn=self._seed_gen, bucket_fn=self._resolve_agent)
         # Held on self: the watcher holds the owner WEAKLY, so a subscription
         # dropped here would be collected and the applier would silently stop
         # firing.
@@ -187,11 +184,6 @@ class WeComDispatcher:
     async def handle_message(self, inbound: "WeComInbound") -> None:
         """Drive one authorized inbound WeCom message through TurnDriver."""
         assert self.client is not None, "WeComDispatcher.client must be set"
-        # Inbound channels-governance gate (off-loop) — recheck per message so a
-        # host-profile deny added after connect stops dispatch without a restart
-        # (the startup gate only blocks CONNECTING). Silently drop on deny.
-        if not await inbound_permitted("wecom"):
-            return
         userid = inbound.userid
         text = inbound.text
         original_text = text
@@ -202,6 +194,7 @@ class WeComDispatcher:
             user_id=userid,
             message_id=inbound.msgid or inbound.req_id,
             attachments_dropped=original_attachments,
+            attachment_names=tuple(att.name for att, _aeskey in inbound.attachments),
         )
         if not await admit_inbound_callback(
             self.sessions,
@@ -209,15 +202,23 @@ class WeComDispatcher:
             route=inbound_route,
         ):
             return
-        logger.info("WeCom inbound from %s: %d chars", userid, len(text or ""))
-
-        # ── Command intercept (no LLM session needed) ──
         # An attachment makes this message CONTENT, never a command: every branch
         # below RETURNS without ingesting, and a WeCom media URL lives ~5 minutes, so
         # a photo captioned "/new" would silently lose the picture.
         # ``parse_mid_turn_override`` stays live because it only strips a prefix.
         has_media = bool(inbound.attachments)
         cmd = None if has_media else parse_command(text)
+        # Inbound channels-governance gate (off-loop) — recheck per message so a
+        # host-profile deny added after connect stops dispatch without a restart
+        # (the startup gate only blocks CONNECTING). Silently drop on deny. Only a
+        # message this dispatcher acts on as /stop claims the pure-cancel exemption,
+        # judged past the group mention exactly as ``parse_command`` judged it.
+        gate_text = (_after_leading_mention(text.strip()) or text) if cmd == "stop" else ""
+        if not await inbound_permitted("wecom", text=gate_text):
+            return
+        logger.info("WeCom inbound from %s: %d chars", userid, len(text or ""))
+
+        # ── Command intercept (no LLM session needed) ──
         if cmd == "new":
             self._conv.bump_gen(userid)
             saved = await reserve_new_generation(
@@ -300,7 +301,7 @@ class WeComDispatcher:
         # configured default, else the canonical "kirocrew" agent -- so the
         # session loads kirocrew-core (spawn_run) instead of kiro-cli's bare
         # built-in default. Mirrors slack/telegram transport_dispatch.
-        agent = self._resolve_agent()
+        agent = self._resolve_agent(userid)
 
         # The turn skeleton (acquire -> identity -> context -> TurnDriver ->
         # guarded post-turn -> finally close/release) lives once in
@@ -454,8 +455,10 @@ class WeComDispatcher:
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
-    def _resolve_agent(self) -> str:
-        return self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCREW_AGENT
+    def _resolve_agent(self, userid: str | None = None) -> str:
+        return self.agent or self._default_agent.for_route(
+            self._conv, userid, self.cfg, self._live_cfg
+        )
 
     def _display_name(self, userid: str) -> str:
         """Sender's name from ``wecom.allowed_users``, else the raw userid.
@@ -499,7 +502,7 @@ class WeComDispatcher:
         gen = self._conv.current_gen(userid)
         return build_dm_session_key(
             "wecom",
-            self._resolve_agent(),
+            self._resolve_agent(userid),
             userid,
             gen=gen,
             dm_scope=str(self.cfg.messaging.dm_scope),
@@ -509,7 +512,7 @@ class WeComDispatcher:
         return seed_generation(
             self.sessions,
             channel="wecom",
-            agent=self._resolve_agent(),
+            agent=self._resolve_agent(userid),
             user_id=userid,
             dm_scope=str(self.cfg.messaging.dm_scope),
         )
@@ -819,7 +822,9 @@ class WeComDispatcher:
         # busy session (ask the user to retry) from an absent one (nothing to
         # compact), and always release what we acquired.
         if not await self.sessions.try_acquire(session_key):
-            if self.sessions.has_session(session_key):
+            if self.sessions.is_retiring(session_key):
+                await self.client.say(inbound, COMPACT_ACCOUNT_CHANGED_REPLY_ZH)
+            elif self.sessions.has_session(session_key):
                 await self.client.say(inbound, "⏳ 正在处理上一条消息，请稍后再试 /compact。")
             else:
                 await self.client.say(inbound, "ℹ️ 当前没有可压缩的对话。")

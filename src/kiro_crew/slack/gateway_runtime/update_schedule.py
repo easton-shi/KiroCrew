@@ -5,10 +5,9 @@ effect an update would have, the in-flight-work census that holds an apply back,
 the pause, drain and settle around an apply, and the claimed restart that re-execs
 the gateway.
 
-Orchestrator fields read: ``_MANDATORY_UPDATE_MAX_DEFER_SECS``,
-``_UPDATE_BUSY_RETRY_SECS``, ``_UPDATE_DRAIN_TIMEOUT_SECS``, ``_running_script_ids``,
-``_session_tasks``, ``dashboard_state``, ``sessions``, ``subagent_mgr``,
-``task_runner``.
+Orchestrator fields read: ``_MANDATORY_UPDATE_MAX_DEFER_SECS``, ``_UPDATE_BUSY_RETRY_SECS``,
+``_UPDATE_DRAIN_TIMEOUT_SECS``, ``_running_script_ids``, ``_session_tasks``, ``cron_svc``,
+``dashboard_state``, ``sessions``, ``subagent_mgr``, ``task_runner``.
 Orchestrator fields written: ``_mandatory_update_deferred_at``,
 ``_mandatory_update_deferred_key``, ``_pending_update_respawn``,
 ``_pending_update_version``, ``_update_apply_deferred``.
@@ -43,6 +42,7 @@ if TYPE_CHECKING:
         _remediation_command,
         _update_info,
         auto_update_effect,
+        close_sessions_for_restart,
         distribution,
         flush_breadcrumb_writes,
         inbound_spool,
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         resolve_restart_launcher,
         run_pre_exec_stops,
         shutdown_event,
+        stop_cron_before_restart,
         subprocess_executor,
         update_ownership,
         wait_for_unwinding_turns,
@@ -482,6 +483,17 @@ async def _restart_gate_when_idle(self: GatewayOrchestrator) -> tuple[bool, int,
     # installer as a tracked task the census does not count; the restart's
     # shutdown would cancel it mid-install, so it is work a restart interrupts.
     background += len(self._dashboard_policy_applies())
+    # So does its git update (the ``dashboard-update`` task): cut off between
+    # its fast-forward and its reinstall, it leaves a tree whose dependencies
+    # were never installed.
+    state = getattr(self, "dashboard_state", None)
+    background += sum(
+        1
+        for task in list(getattr(state, "_background_tasks", None) or ())
+        if callable(getattr(task, "get_name", None))
+        and task.get_name() == "dashboard-update"
+        and not task.done()
+    )
     if turns + background > 0:
         await self._finish_auto_update_apply()
         logger.info(
@@ -495,6 +507,17 @@ async def _restart_gate_when_idle(self: GatewayOrchestrator) -> tuple[bool, int,
         task.add_done_callback(self._background_tasks.discard)
     logger.info("Restart gate: idle; turn admission paused for the restart")
     return True, 0, 0
+
+
+def _restart_gate_held(self: GatewayOrchestrator) -> bool:
+    """Whether a restart the idle gate approved is still on its way.
+
+    Synchronous, so ``api_update_apply`` reads it and launches its installer
+    with no await between: an installer started under that hold is cut off by
+    the restart.
+    """
+    hold = getattr(self, "_restart_gate_hold", None)
+    return hold is not None and not hold.done()
 
 
 async def _release_restart_gate_hold(self: GatewayOrchestrator) -> None:
@@ -1012,7 +1035,17 @@ async def _restart_after_update_claimed(
             self._update_apply_deferred = True
             logger.warning("Update restart fence lost to real shutdown; deferring restart")
             return
-        await sessions.close_all()
+    # The exec skips _shutdown, so stop cron here, before close_all() as _shutdown orders it.
+    await stop_cron_before_restart(getattr(self, "cron_svc", None))
+    if sessions is not None:
+        # A planned restart: the turns close_all() cuts resume on the next boot.
+        # Already loaded by ``updates_apply``, so a replaced tree cannot fail it.
+        from kiro_crew.dashboard import restart_resume
+
+        await restart_resume.record_running_slots(self.dashboard_state)
+        # Bounded even against a task that outlives its cancel: close_all
+        # shuts turn admission first, and only the exec below ends this image.
+        await close_sessions_for_restart(sessions.close_all())
         # close_all() cut every dashboard turn that was mid-reply, and each one
         # saves the text its user watched stream as it unwinds, after the save
         # above. The exec below would beat that save.
@@ -1036,14 +1069,31 @@ async def _restart_after_update_claimed(
     # registers its stop with the pre-exec seam. Bounded and never raises.
     await run_pre_exec_stops()
 
+    from kiro_crew.dashboard import crash_dump_store
+
     # Any callback that ran while close_all awaited used the synchronous
     # fenced refusal path. Drain pre-fence workers and registered handlers
-    # one final time; never cancel or force through them.
-    await self._drain_update_callback_work(timeout=None)
+    # one final time; never cancel or force through them. The exec skips the
+    # orderly exit that marks the crash dump clean, so mark it after that
+    # drain, never over it: a SIGKILL while it hangs must not read as clean.
+    # Then look once more without waiting: work that arrived while the mark
+    # was written withdraws it and is drained first. A drain that gave up (an
+    # unreadable callback count) goes on to the exec, as it always did.
+    while True:
+        drained = await self._drain_update_callback_work(timeout=None)
+        await crash_dump_store.mark_clean_exit()
+        try:
+            if not drained or await self._drain_update_callback_work(timeout=0.0):
+                break
+        except BaseException:
+            await crash_dump_store.unmark_clean_exit()
+            raise
+        await crash_dump_store.unmark_clean_exit()
     if shutdown_event.is_set():
         # The operator asked this process to stop while the restart was
         # being prepared. Exec'ing would swallow that stop; the applied
         # update takes effect at the next start instead.
+        await crash_dump_store.unmark_clean_exit()
         logger.info("Update applied; restart skipped because the gateway is shutting down")
         return
     logger.info("Update callback drain complete, restarting gateway")
@@ -1061,6 +1111,7 @@ async def _restart_after_update_claimed(
         else:
             platform_compat.reexec_python_module("kiro_crew", sys.argv[1:], executable=exe)
     except OSError:
+        await crash_dump_store.unmark_clean_exit()
         await platform_compat.exit_after_failed_restart_exec(launcher or exe)
 
 
@@ -1267,9 +1318,10 @@ async def _check_for_updates_legacy(self: GatewayOrchestrator) -> None:
                 # told to "run `kirocrew update`": that command re-runs the
                 # installer, which adds a second copy and leaves this process
                 # on the old version. Give it the in-place upgrade hint
-                # instead — the same words `kirocrew update` itself now
-                # prints for this shape. pipx and the managed venv keep the
-                # `kirocrew update` pointer, which upgrades them correctly.
+                # instead, the command `kirocrew update` prints for this
+                # shape, and say it runs from the user's own terminal: an
+                # agent can read this log line. pipx and the managed venv keep
+                # the `kirocrew update` pointer, which upgrades them correctly.
                 from kiro_crew.platform.update_layout import (
                     PipUpgradeHint,
                     non_managed_pip_update_hint,
@@ -1322,8 +1374,8 @@ async def _check_for_updates_legacy(self: GatewayOrchestrator) -> None:
                     logged_upgrade = redact_log_via_context(upgrade.command)
                     logger.warning(
                         "Version compliance: running %s is below the policy minimum %s, "
-                        "but this install (%s) cannot apply it unattended (%s) — upgrade "
-                        "this environment in place with `%s`, then `%s`",
+                        "but this install (%s) cannot apply it unattended (%s) — from your "
+                        "own terminal, upgrade this environment in place with `%s`, then run `%s`",
                         _running_version,
                         min_version(),
                         info.get("managed_by") or "unknown",
@@ -1343,7 +1395,8 @@ async def _check_for_updates_legacy(self: GatewayOrchestrator) -> None:
                     logger.warning(
                         "Version compliance: running %s is below the policy minimum %s, "
                         "but this install (%s) cannot apply it unattended (%s) — the "
-                        "signed upgrade %s Once upgraded, run `%s`",
+                        "signed upgrade %s Once upgraded, run `%s`. Run both steps from your "
+                        "own terminal.",
                         _running_version,
                         min_version(),
                         info.get("managed_by") or "unknown",
@@ -1439,6 +1492,10 @@ async def _check_for_updates_legacy(self: GatewayOrchestrator) -> None:
                         "Update %s was put off by the user — not installing it unattended",
                         info.get("latest_version"),
                     )
+                elif cfg.auto_update and effect.manual_only:
+                    # The operator's policy chose this, so it is not a fault: the
+                    # provider path logs the same case at INFO.
+                    logger.info("Auto-update is on, but %s — notifying instead", effect.reason)
                 elif cfg.auto_update and not installs:
                     logger.warning(
                         "Auto-update is on, but this install (%s) cannot apply it "

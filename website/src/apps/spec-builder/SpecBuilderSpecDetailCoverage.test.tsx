@@ -26,13 +26,17 @@ vi.mock('./components/ChatColumn', () => ({
   default: ({ name, slotKey, onSend }: {
     name: string
     slotKey?: string
-    onSend: (msg: string, meta?: { pastes?: unknown[] }) => Promise<unknown>
+    onSend: (msg: string, meta?: { pastes?: unknown[]; sendId?: string }) => Promise<unknown>
   }) => (
     <div data-testid="chat-column" data-name={name} data-slot={slotKey ?? ''}>
-      <button type="button" data-testid="chat-send" onClick={() => { void onSend('typed in the chat') }}>
+      <button type="button" data-testid="chat-send" onClick={() => { void onSend('typed in the chat', { sendId: 'spec-send-1' }) }}>
         send
       </button>
-      <button type="button" data-testid="chat-send-paste" onClick={() => { void onSend(`look:\n${PASTED}`, { pastes: [PASTE_BLOCK] }) }}>
+      <button
+        type="button"
+        data-testid="chat-send-paste"
+        onClick={() => { void onSend(`look:\n${PASTED}`, { pastes: [PASTE_BLOCK], sendId: 'spec-paste-1' }) }}
+      >
         send paste
       </button>
     </div>
@@ -470,7 +474,10 @@ describe('SpecDetail phase actions', () => {
     const approve = await screen.findByRole('button', { name: /Approve → Design/ })
     fireEvent.click(approve)
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /Sending/ })).toBeDisabled())
+    // Busy, not native disabled, while the approval write is in flight: it reads
+    // aria-disabled and ignores clicks but keeps keyboard focus (#32999).
+    await waitFor(() => expect(screen.getByRole('button', { name: /Sending/ })).toHaveAttribute('aria-disabled', 'true'))
+    expect(screen.getByRole('button', { name: /Sending/ })).not.toBeDisabled()
     const sent = calls.filter((c) => c.url.includes('/message'))
     expect(sent).toHaveLength(1)
     expect(JSON.parse(sent[0].body).text).toContain('Requirements approved')
@@ -479,8 +486,10 @@ describe('SpecDetail phase actions', () => {
     // It must NOT spring back to "Approve → Design". The phase is derived from
     // the documents on disk, so it stays 'requirements' until the agent has
     // written design.md — showing the approval button again in that window read
-    // as "nothing happened" and invited a second approval into the same turn.
-    await waitFor(() => expect(screen.getByRole('button', { name: /Drafting design/ })).toBeDisabled())
+    // as "nothing happened" and invited a second approval into the same turn. It
+    // stays inert via aria-disabled (busy), so it still keeps focus.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Drafting design/ })).toHaveAttribute('aria-disabled', 'true'))
+    expect(screen.getByRole('button', { name: /Drafting design/ })).not.toBeDisabled()
     expect(screen.queryByRole('button', { name: /Approve → Design/ })).not.toBeInTheDocument()
   })
 
@@ -544,7 +553,9 @@ describe('SpecDetail phase actions', () => {
     renderDetail()
 
     fireEvent.click(await screen.findByRole('button', { name: /Approve → Design/ }))
-    await waitFor(() => expect(screen.getByRole('button', { name: /Sending/ })).toBeDisabled())
+    // Busy (aria-disabled, focusable), not native disabled, while in flight (#32999).
+    await waitFor(() => expect(screen.getByRole('button', { name: /Sending/ })).toHaveAttribute('aria-disabled', 'true'))
+    expect(screen.getByRole('button', { name: /Sending/ })).not.toBeDisabled()
 
     // A decision answered while the approval is still in flight.
     fireEvent.click(screen.getByTestId('state-send'))
@@ -553,7 +564,8 @@ describe('SpecDetail phase actions', () => {
     releaseApproval?.()
 
     await waitFor(() => expect(screen.getByRole('button', { name: /Drafting design/ })).toBeInTheDocument())
-    expect(screen.getByRole('button', { name: /Drafting design/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Drafting design/ })).toHaveAttribute('aria-disabled', 'true')
+    expect(screen.getByRole('button', { name: /Drafting design/ })).not.toBeDisabled()
     expect(screen.queryByRole('button', { name: /Sending/ })).not.toBeInTheDocument()
   })
 
@@ -596,7 +608,7 @@ describe('SpecDetail phase actions', () => {
     expect(screen.getByText('archived')).toBeInTheDocument()
   })
 
-  it('pauses a running build and disables the control while stopping', async () => {
+  it('pauses a running build, keeping the inert control focused while stopping', async () => {
     let release: (() => void) | undefined
     installFetch(
       { ...BASE, status: 'executing', files: { 'requirements.md': '# r', 'tasks.md': '- [ ] one' } },
@@ -606,8 +618,16 @@ describe('SpecDetail phase actions', () => {
     )
     renderDetail()
 
-    fireEvent.click(await screen.findByRole('button', { name: /Pause/ }))
-    await waitFor(() => expect(screen.getByRole('button', { name: /Pausing/ })).toBeDisabled())
+    const pause = await screen.findByRole('button', { name: /Pause/ })
+    pause.focus()
+    fireEvent.click(pause)
+    // Inert but natively enabled while the stop runs: a second press sends
+    // nothing, and the keyboard user who pressed it keeps focus.
+    const pausing = await screen.findByRole('button', { name: /Pausing/ })
+    expect(pausing).toHaveAttribute('aria-disabled', 'true')
+    expect(pausing).not.toBeDisabled()
+    expect(pausing).toHaveFocus()
+    fireEvent.click(pausing)
     expect(calls.filter((c) => c.url.includes('/stop'))).toHaveLength(1)
     expect(JSON.parse(calls[0].body)).toEqual({
       spec_dir: '/proj/checkout/.kiro/specs/checkout',
@@ -639,20 +659,26 @@ describe('SpecDetail phase actions', () => {
 
     fireEvent.click(await screen.findByTestId('chat-send'))
     await waitFor(() => expect(calls.filter((c) => c.url.includes('/message'))).toHaveLength(1))
-    expect(JSON.parse(calls[0].body).text).toBe('typed in the chat')
-    expect(JSON.parse(calls[0].body).meta).toBeUndefined()
+    expect(JSON.parse(calls[0].body)).toEqual({
+      text: 'typed in the chat',
+      spec_dir: BASE.spec_dir,
+      slot_key: BASE.slot_key,
+      meta: { sendId: 'spec-send-1' },
+    })
   })
 
-  it('forwards a chat send\'s collapsed pastes as meta.pastes, so the stored row keeps the chip', async () => {
+  it('forwards a chat send\'s collapsed pastes and delivery identity', async () => {
     installFetch(BASE)
     renderDetail()
 
     fireEvent.click(await screen.findByTestId('chat-send-paste'))
     await waitFor(() => expect(calls.filter((c) => c.url.includes('/message'))).toHaveLength(1))
-    const body = JSON.parse(calls[0].body)
-    expect(body.text).toBe(`look:\n${PASTED}`)
-    expect(body.meta).toEqual({ pastes: [PASTE_BLOCK] })
-    expect(body.slot_key).toBe('spec-builder-checkout-99')
+    expect(JSON.parse(calls[0].body)).toEqual({
+      text: `look:\n${PASTED}`,
+      spec_dir: BASE.spec_dir,
+      slot_key: BASE.slot_key,
+      meta: { pastes: [PASTE_BLOCK], sendId: 'spec-paste-1' },
+    })
   })
 
   it('hands the task list off to a build agent', async () => {

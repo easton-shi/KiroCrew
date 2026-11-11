@@ -40,6 +40,7 @@ from kiro_crew._sqlite_compat import (
 )
 from kiro_crew.config.loader import config_dir
 from kiro_crew.context_assembly.budget import _MEMORY_PROJECTS_CAP
+from kiro_crew.memory_history_stamps import is_history_day_header, is_history_stamp
 from kiro_crew.memory_recall import recall_terms
 from kiro_crew.memory_startup import require_memory_ready
 from kiro_crew.memory_stores import named_store_operation
@@ -925,16 +926,19 @@ class MemoryStore:
             source_remaining = share
             candidates = []
             first_line = True
+            history_day = label != "Projects"
             for line in body.splitlines():
                 if not line.strip():
                     first_line = True
+                elif history_day and (is_history_day_header(line) or is_history_stamp(line)):
+                    first_line = True  # the entry's own first line takes the slot
                 elif line.startswith(("#", "- ", "* ")):
                     candidates.append(line.strip())
                     first_line = line.startswith("#")
                 elif first_line:
                     candidates.append(line.strip())
                     first_line = False
-            if label != "Projects":
+            if history_day:
                 candidates.reverse()
             for title in candidates:
                 line = f"- {label}: {title[:160]}\n"
@@ -1236,7 +1240,7 @@ class MemoryStore:
                     continue  # absent, or a link we will not chmod through
                 ok = False
                 logger.warning(
-                    "Cannot restrict %s to owner; it may be readable by other users",
+                    "SECURITY: Cannot restrict %s to owner; it may be readable by other users",
                     path,
                     exc_info=True,
                 )
@@ -1433,7 +1437,10 @@ class MemoryStore:
 
     @named_store_operation
     def rebuild_index(self) -> int:
-        """Rebuild the full FTS index from all memory files. Returns file count."""
+        """Rebuild the full FTS index from all memory files.
+
+        Returns the number of files indexed, or 0 when the rebuild failed.
+        """
         require_memory_ready(self._memory_store_name)
         if self._memory_version == 2:
             return self._member_store().rebuild_memory_index()
@@ -1499,11 +1506,14 @@ class MemoryStore:
                 indexed += 1
             conn.commit()
         except Exception:
+            # Nothing was committed, so report no files indexed rather than
+            # every source file: callers log this count as the rebuild result.
+            indexed = 0
             logger.warning("FTS rebuild failed", exc_info=True)
         finally:
             if conn is not None:
                 conn.close()
-        return len(files)
+        return indexed
 
     @named_store_operation
     def index_row_count(self) -> int | None:

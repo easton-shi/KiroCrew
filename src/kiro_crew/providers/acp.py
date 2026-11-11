@@ -119,7 +119,6 @@ from kiro_crew.providers import acp_lifecycle as _acp_lifecycle
 from kiro_crew.providers import acp_model_effort as _acp_model_effort
 from kiro_crew.providers import acp_runtime_start as _acp_runtime_start
 from kiro_crew.providers import acp_turns as _acp_turns
-from kiro_crew.providers.acp_cli_overlay import _read_cli_overlay
 from kiro_crew.providers.base import (  # noqa: F401
     CancelOutcome,
     LLMEvent,
@@ -159,6 +158,7 @@ class AcpProvider(LLMProvider):
         channel_id: str | None = None,
         extra_env: dict[str, str] | None = None,
         acp_backend: str = "",
+        harness_pin: str = "",
         effort_per_model: dict[str, str] | None = None,
         unbound_effort: str = "",
         inherited_effort: str = "",
@@ -177,6 +177,7 @@ class AcpProvider(LLMProvider):
         on_gate_queued: Callable[..., None] | None = None,
         disposable_work_dir: bool = False,
         side_read_only: bool = False,
+        include_memory: bool = True,
     ) -> None:
         # An unrecognized backend would pass every ``_is_<backend>`` check and
         # spawn kiro-cli, so a typo'd config would drive the wrong agent with no
@@ -206,6 +207,9 @@ class AcpProvider(LLMProvider):
             # A Side Chat session that may run read-only tools; the claude client
             # starts it confined (AcpClient._claude_session_meta). Inert on kiro-cli.
             "side_read_only": side_read_only,
+            # A sub-agent spawned with ``include_memory=false``; the claude client
+            # keeps Claude Code's auto-memory out of it. Inert on kiro-cli.
+            "include_memory": include_memory,
         }
         if agent:
             kwargs["agent"] = agent
@@ -229,6 +233,9 @@ class AcpProvider(LLMProvider):
         # ``AcpRuntime`` it constructs itself, and a dedicated subagent's
         # inherited work directory has to reach THAT process.
         self._shared_scratch: Path | None = shared_scratch
+        # The Bot pin the factory's selection used (``crewmate_harness.route_pin``),
+        # for the runtimes this provider builds.
+        self._harness_pin = harness_pin
         # Start-queue exit/entry callbacks, forwarded to BOTH ``runtime.spawn`` calls
         # (the first spawn and the resume-died respawn: the cold-start admission)
         # and to ``runtime.create_session`` on the fresh-session path
@@ -308,21 +315,11 @@ class AcpProvider(LLMProvider):
             if tool_search_min_tokens is None
             else tool_search_min_tokens
         )
-        if self._client.backend in ACP_BACKENDS_EFFORT_OVERLAY:
-            # Read back the levels the overlay already holds, so after a gateway
-            # restart the map names what kiro-cli will run. Caller-provided
-            # overrides win — only fill gaps.
-            #
-            # The overlay's own readers only. The file is keyed by work dir, so
-            # every session in one project shares it; read back by a harness that
-            # never opens it (KAS), it would start a new chat at whatever level
-            # another chat in the same work dir picked last. Such a harness takes
-            # its level from the factory alone.
-            try:
-                for m, lvl in _read_cli_overlay(self._client._work_dir).items():
-                    self._effort_per_model.setdefault(m, lvl)
-            except Exception:
-                logger.debug("ACP effort overlay recovery failed", exc_info=True)
+        # The workspace ``cli.json`` is not touched here. This constructor runs on
+        # the gateway event loop, and the file is the user's own settings file that
+        # a repository can track at any size. ``start()`` recovers the levels the
+        # overlay holds and writes the effort and Tool Search keys, off the loop.
+        self._effort_overlay_recovered = False
 
     @property
     def client(self) -> AcpClient:
@@ -523,6 +520,29 @@ class AcpProvider(LLMProvider):
         """The upgrade notice when the KAS this session runs drops its agent's prompt,
         else ``""``. Recorded when the session registered its ``customAgents``."""
         notice = getattr(self._client, "kas_agent_prompt_notice", "")
+        return notice if isinstance(notice, str) else ""
+
+    @property
+    def mode_pinned_notice(self) -> str:
+        """The notice when this claude session runs in ``default`` instead of the
+        ``auto`` it asked for, because its folder's settings file is not Crew's,
+        else ``""``. Recorded when the settings seed ran."""
+        notice = getattr(self._client, "claude_mode_pinned_notice", "")
+        return notice if isinstance(notice, str) else ""
+
+    @property
+    def kiro_cli_model_notice(self) -> str:
+        """The notice naming kiro-cli's ``chat.defaultModel`` when this KAS session did
+        not start on it, else ``""``. Recorded at the cold start."""
+        notice = getattr(self._client, "kas_default_model_notice", "")
+        return notice if isinstance(notice, str) else ""
+
+    @property
+    def telemetry_unconfirmed_notice(self) -> str:
+        """The notice that this KAS session's engine was asked to turn telemetry off
+        and cannot confirm it, or that this folder's opt-out was not applied, else ``""``.
+        Recorded when the session was created or loaded."""
+        notice = getattr(self._client, "kas_telemetry_notice", "")
         return notice if isinstance(notice, str) else ""
 
     @property
@@ -923,6 +943,11 @@ class AcpProvider(LLMProvider):
         """The resolved Tool Search choice this provider spawns runtimes with (H14 capability)."""
         return self._tool_search_settings()
 
+    @property
+    def harness_pin(self) -> str:
+        """The Bot pin this provider's runtimes carry for KAS's route rule 2 (H14 capability)."""
+        return self._harness_pin
+
     def _tool_search_settings(self) -> ToolSearchSettings | None:
         """The operator's Tool Search choice, for the runtime's wire channel.
 
@@ -1003,8 +1028,13 @@ class AcpProvider(LLMProvider):
         """The client's batch-guard refusal reason for *request_id*, taken once."""
         return self._client.take_batch_refusal(request_id)
 
-    async def reject_tool(self, request_id: str | int) -> None:
-        await self._client.reject_tool(request_id)
+    async def reject_tool(self, request_id: str | int, reason: str = "") -> None:
+        # *reason*: what the person typed with the rejection, sent only when given
+        # (see ``AcpClient.reject_tool``), so a bare reject reaches the client as before.
+        if reason:
+            await self._client.reject_tool(request_id, reason=reason)
+        else:
+            await self._client.reject_tool(request_id)
 
     def context_usage_pct(self) -> float:
         return self._client.last_prompt_stats.context_pct
@@ -1254,6 +1284,7 @@ class AcpProvider(LLMProvider):
 
     # The workspace ``cli.json`` overlay a spawn reads: ``kiro_crew.providers.acp_cli_overlay``.
     _apply_effort_overlay = _acp_cli_overlay._apply_effort_overlay
+    _recover_effort_overlay = _acp_cli_overlay._recover_effort_overlay
     _apply_tool_search_overlay = _acp_cli_overlay._apply_tool_search_overlay
     # The model and reasoning effort the session runs at: ``kiro_crew.providers.acp_model_effort``.
     maybe_refresh_available_models = _acp_model_effort.maybe_refresh_available_models
@@ -1268,6 +1299,8 @@ class AcpProvider(LLMProvider):
     set_model = _acp_model_effort.set_model
     clear_effort = _acp_model_effort.clear_effort
     _apply_initial_effort = _acp_model_effort._apply_initial_effort
+    ultracode_enabled = _acp_model_effort.ultracode_enabled
+    set_ultracode = _acp_model_effort.set_ultracode
     # A cold start on a shared ``AcpRuntime``: ``kiro_crew.providers.acp_runtime_start``.
     _start_kiro_runtime = _acp_runtime_start._start_kiro_runtime
     _emit_kiro_startup_metric = _acp_runtime_start._emit_kiro_startup_metric
@@ -1430,6 +1463,7 @@ _SERVED: frozenset[str] = frozenset(
         "_clamp_min_tokens",
         "_clear_cli_overlay_effort",
         "_is_transient_resume_lock_error",
+        "_read_cli_overlay",
         "_unlink_dead_session_lock",
         "_write_cli_overlay",
         "_write_tool_search_overlay",
@@ -1452,6 +1486,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _clamp_min_pct,
         _clamp_min_tokens,
         _clear_cli_overlay_effort,
+        _read_cli_overlay,
         _write_cli_overlay,
         _write_tool_search_overlay,
     )

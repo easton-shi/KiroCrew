@@ -7,7 +7,7 @@ import { requestSlotFolderOpen, setAgentSwitchNotice } from '../../store/chatSli
 import { isStaleProjectDirError } from '../../utils/folderAgent'
 import type { ChatFolder } from '../../types'
 import { newChatShortcutArgs } from './newChatArgs'
-import { createChatForView, showCreatedChat } from '../../lib/createdChatView'
+import { createChatForView, reportCreateFailure, showCreatedChat } from '../../lib/createdChatView'
 import { useAskingNavigate } from '../../components/NavigationLeaveGuard'
 import { pendingSlotSwitch, pendingSlotSwitchTarget, performSlotSwitch } from '../../lib/slotSwitch'
 import { performAgentSlotSwitch } from '../../lib/agentSwitch'
@@ -79,9 +79,11 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
       // The one failure a folder create adds: the folder's project directory
       // is gone. The folder "+" says so under the folder header; the shortcut
       // has no header, so it uses the shell's transient notice, as an error
-      // like the folder's own.
+      // like the folder's own. Any other failure goes there too.
       if ('project' in args && args.project && isStaleProjectDirError(err)) {
         dispatch(setAgentSwitchNotice({ message: i18nT('pages.chatSidebar.folder_project_dir_missing', { path: args.project }), error: true }))
+      } else {
+        reportCreateFailure(dispatch, err)
       }
     },
     onSuccess: (view) => {
@@ -117,11 +119,14 @@ export function useShellKeyboard({ toggleFocusMode, toggleNav, terminalEnabled, 
   useEffect(() => {
     // A notice that offers a new chat stays until the user dismisses it or uses
     // the offer: expiring it would unmount the banner while its create runs and
-    // hide a failed create.
-    if (!agentSwitchNotice || agentSwitchNotice.newChatAgent) return
+    // hide a failed create. A notice that offers to open a session started in
+    // the background stays too: it is the one place that names that session,
+    // and the banner drops a plain one once the user is on it. A popout or embed frame
+    // shows no such offer, so there it expires like plain status.
+    if (!agentSwitchNotice || agentSwitchNotice.newChatAgent || (agentSwitchNotice.openSlot && !isPopout && !isEmbed)) return
     const timer = window.setTimeout(() => dispatch(setAgentSwitchNotice(null)), 6000)
     return () => window.clearTimeout(timer)
-  }, [agentSwitchNotice, dispatch])
+  }, [agentSwitchNotice, dispatch, isPopout, isEmbed])
   // A new chat that could not get its own session folder opened on the default
   // project; the API client announces it for every create path (see
   // lib/sessionFolderNotice), and it shares this transient notice. The folder

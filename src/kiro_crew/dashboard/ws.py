@@ -537,6 +537,9 @@ def build_subagent_snapshot(a: Any, *, now: float | None = None) -> dict:
     The key is OMITTED entirely when the agent is not stalled, so a client
     cannot attach an idle span to a healthy row — the reducer pairs the span
     with the flag and would otherwise have to defend against the mismatch.
+
+    ``slot`` is the tab of the chat the run's spawn tree started from
+    (``root_session_key``), so a nested run replays where its live frames draw.
     """
     ts = time.time() if now is None else now
 
@@ -547,7 +550,7 @@ def build_subagent_snapshot(a: Any, *, now: float | None = None) -> dict:
 
     data: dict = {
         "id": a.id,
-        "slot": subagent_event_slot(a.parent_session_key),
+        "slot": subagent_event_slot(getattr(a, "root_session_key", "") or a.parent_session_key),
         # The sub-agent's OWN session key (where it writes its ctx_blocks /
         # token rows), so a client can fetch this node's own context-trace and
         # render its window composition. Mirrors the run key derived in
@@ -684,8 +687,9 @@ def _handle_slot_focused(
     at most one pending prefetch per connection (a repeat frame for the slot
     whose prefetch is still pending keeps it) — only the task this path
     created is touched, never one armed by the slot-create/project-set
-    intent signals. ``slot_key`` of ``None``/empty means blur (tab hidden,
-    no focused slot): cancel and do nothing else.
+    intent signals, and a reload's respawn (a resume start that reports its
+    end) is kept as it is. ``slot_key`` of ``None``/empty means blur (tab
+    hidden, no focused slot): cancel and do nothing else.
 
     Returns the task now pending for this socket, if any.
     """
@@ -726,6 +730,15 @@ def _handle_slot_focused(
     # and then no-op — silently gutting the fresh eager-spawn path for every
     # new slot. Non-resumable focus preserves whatever task is pending.
     if not sessions.resumable_hint(session_key):
+        return None
+    # A reload's respawn is already pending for this slot: it performs this
+    # same load, and re-arming would cancel it and start over at the debounce,
+    # dropping its priority and the row its reload posts. It is not this
+    # socket's to cancel. Another window's focus prefetch is re-armed instead,
+    # so the window now focused tracks it and the other's blur cannot cancel it.
+    pending = getattr(slot, "_eager_spawn_task", None)
+    reported = getattr(slot, "_eager_spawn_reported_resume", False)
+    if pending is not None and not pending.done() and reported:
         return None
     return schedule_eager_spawn(state, slot, allow_resume=True)
 
@@ -1418,7 +1431,9 @@ async def _serve_ws(
                                 # prefix-strip tags replayed cards with a slot
                                 # no tab reads, so the panel rehydrated empty
                                 # after every reconnect for cron/channel tabs.
-                                slot = subagent_event_slot(a.parent_session_key)
+                                slot = subagent_event_slot(
+                                    getattr(a, "root_session_key", "") or a.parent_session_key
+                                )
                                 try:
                                     _replay.append(
                                         {

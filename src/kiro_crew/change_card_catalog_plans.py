@@ -185,6 +185,10 @@ STORE_DASHBOARD = "dashboard"
 _BOOL_VALUES: tuple[Any, ...] = (True, False)
 DASHBOARD_SETTINGS: dict[str, tuple[str, tuple[Any, ...]]] = {
     "chat.response-verbosity": ("verbosity", ("default", "concise", "ultra", "answer_only")),
+    "chat.preferred-reply-language": (
+        "preferred_language",
+        ("", "en", "zh-CN", "hi", "es", "fr", "bn", "pt", "ru", "de", "ja", "ko", "it"),
+    ),
     "chat.widget-density": ("widget_density", ("more", "less")),
     "chat.quick-send": ("quick_send", _BOOL_VALUES),
     "chat.merge-queued-messages": ("merge_queued_messages", _BOOL_VALUES),
@@ -1033,9 +1037,11 @@ def build_preview(
             out["changes"].append(row)
         out["risk"] = RISK_CODE_EXEC
         body = {"source": p["source"], "expected_revision": revision, **changed}
-        out["apply"] = [
-            step("PATCH", f"/api/workflows/definitions/{_q(str(snapshot['id']))}", body)
-        ]
+        ref = str(snapshot.get("ref") or snapshot["id"])
+        if ref != snapshot["id"]:
+            # A free slug stands in for a reserved id: pin the write to the id.
+            body["expected_id"] = str(snapshot["id"])
+        out["apply"] = [step("PATCH", f"/api/workflows/definitions/{_q(ref)}", body)]
     else:  # KIND_DENIED_COMMAND
         if p["action"] == "add":
             if snapshot.get("exists"):

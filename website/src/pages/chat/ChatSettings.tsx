@@ -33,6 +33,11 @@ export const CONTENT_WIDTH: Record<ContentWidth, { messages: string; input: stri
 
 export interface ChatConfig {
   contentWidth: ContentWidth
+  /** Widen transcript tables into the pane's spare width. Set by any table's
+   *  own Widen / Narrow button and followed by every table, so the choice holds
+   *  across tables and reloads. Default false: a table keeps the reading
+   *  column's width until the reader asks. */
+  widenTables: boolean
   historyExpanded: boolean
   showTimestamps: boolean
   showTurnStats: boolean
@@ -69,6 +74,11 @@ export interface ChatConfig {
    *  sends it. Default false: it adds an optimizer call before every
    *  message, so it is the user's call. */
   optimizeBeforeSend: boolean
+  /** Offer "Optimize prompt" in the composer: its button, "+" menu row and
+   *  Cmd/Ctrl+Shift+Enter shortcut. Off also stops Optimize Before Sending,
+   *  which runs the same optimizer. Default true, the composer's long-standing
+   *  shape. */
+  showOptimizePrompt: boolean
   /** Opt in to giving a folder that holds nothing no body at all, so it costs one
    *  row instead of two. Default false: this changes how every empty folder in
    *  the sidebar reads, and the row it removes is the only labelled "New chat in
@@ -83,6 +93,10 @@ export interface ChatConfig {
    *  in a floating layer over them; rows keep their width (desktop only).
    *  Off by default. */
   fullTitlesOnScroll: boolean
+  /** Hovering a needs-me session row (or pressing → on it) opens the quick
+   *  reply card beside it (`NeedsMeHoverCard`). Default true. When false no
+   *  card opens; the rows and their badges are unchanged. */
+  needsMeHoverCard: boolean
   /** How many lines a session card's title may wrap onto before it is cut
    *  off. 1 (the default) keeps the single-line ellipsis. */
   sessionTitleLines: CardLineCount
@@ -155,7 +169,7 @@ const LS_KEY = 'mc-chat-config'
  *  it. The sidebar's view toggle persists this flag BEFORE creating its first
  *  column, so a deliberate board user always has an explicit `true` stored and
  *  is unaffected by the default. */
-const DEFAULTS: ChatConfig = { historyExpanded: true, showTimestamps: true, showTurnStats: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', tagColumnsEnabled: false, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth', showContextPct: false, showContextTokens: false, pinLastPrompt: true, hideEmptyFolderBody: false, countSubfolderContents: false, sidebarClickOpensTab: false, spellcheck: true, arrowKeyPromptHistory: true, inlineMarkdown: false, optimizeBeforeSend: false, showFullPastes: false, toolCallsStartExpanded: false, doubleClickToEdit: false, doubleEscapeToStop: false, scrollOnSend: true, dimInactivePanes: true, minimapSide: 'left', messageFontSize: DEFAULT_MESSAGE_FONT_SIZE, fullTitlesOnScroll: false, sessionTitleLines: 1, sessionPreviewLines: 1 }
+const DEFAULTS: ChatConfig = { historyExpanded: true, showTimestamps: true, showTurnStats: true, sendOnEnter: 'enter', collapseAllSteps: true, confirmCloseSession: false, simplifiedToolNames: true, contentWidth: 'compact', widenTables: false, tagColumnsEnabled: false, fileChipStyle: 'expanded', followUpLayout: 'scroll', streamMode: 'smooth', showContextPct: false, showContextTokens: false, pinLastPrompt: true, hideEmptyFolderBody: false, countSubfolderContents: false, sidebarClickOpensTab: false, spellcheck: true, arrowKeyPromptHistory: true, inlineMarkdown: false, optimizeBeforeSend: false, showOptimizePrompt: true, showFullPastes: false, toolCallsStartExpanded: false, doubleClickToEdit: false, doubleEscapeToStop: false, scrollOnSend: true, dimInactivePanes: true, minimapSide: 'left', messageFontSize: DEFAULT_MESSAGE_FONT_SIZE, fullTitlesOnScroll: false, needsMeHoverCard: true, sessionTitleLines: 1, sessionPreviewLines: 1 }
 
 const clampMessageFontSize = (n: number): number =>
   Math.max(MIN_MESSAGE_FONT_SIZE, Math.min(MAX_MESSAGE_FONT_SIZE, Math.round(n)))
@@ -177,6 +191,7 @@ export function loadChatConfig(): ChatConfig {
     const stored = JSON.parse(localStorage.getItem(LS_KEY) || '{}')
     const cfg = { ...DEFAULTS, ...stored, sendOnEnter: migrateSendMode(stored.sendOnEnter) }
     if (!(cfg.contentWidth in CONTENT_WIDTH)) cfg.contentWidth = 'compact'
+    if (typeof cfg.widenTables !== 'boolean') cfg.widenTables = false
     // Map legacy fileChipStyle values onto the current set:
     //   'tooltip'                                 → 'minimal'
     //   'pebble' / 'full' / 'compact'             → 'expanded'
@@ -198,11 +213,13 @@ export function loadChatConfig(): ChatConfig {
     if (typeof cfg.arrowKeyPromptHistory !== 'boolean') cfg.arrowKeyPromptHistory = true
     if (typeof cfg.inlineMarkdown !== 'boolean') cfg.inlineMarkdown = false
     if (typeof cfg.optimizeBeforeSend !== 'boolean') cfg.optimizeBeforeSend = false
+    if (typeof cfg.showOptimizePrompt !== 'boolean') cfg.showOptimizePrompt = true
     // Coerced, not trusted: a stored non-boolean would otherwise make the empty
     // folder shape depend on a truthy string.
     if (typeof cfg.hideEmptyFolderBody !== 'boolean') cfg.hideEmptyFolderBody = false
     if (typeof cfg.countSubfolderContents !== 'boolean') cfg.countSubfolderContents = false
     if (typeof cfg.fullTitlesOnScroll !== 'boolean') cfg.fullTitlesOnScroll = false
+    if (typeof cfg.needsMeHoverCard !== 'boolean') cfg.needsMeHoverCard = true
     // Coerced, not trusted: anything but 1, 2 or 3 would pick no clamp class
     // and leave the card's text unbounded.
     if (!isCardLineCount(cfg.sessionTitleLines)) cfg.sessionTitleLines = 1
@@ -384,8 +401,12 @@ export interface DashboardConfig {
   restore_window_minutes: number
   merge_queued_messages: boolean
   default_memory_mode: MemoryMode
+  /** New chats start in Ultra Mode where it is offered (`dashboard.new_chat_crew_mode`). */
+  new_chat_crew_mode?: boolean
   widget_density: 'more' | 'less'
   verbosity: 'default' | 'concise' | 'answer_only'
+  /** Language code the agent replies in; '' = the language of the user's message. */
+  preferred_language?: string
   quick_send: boolean
   session_grid: boolean
   tail_fork_enabled: boolean

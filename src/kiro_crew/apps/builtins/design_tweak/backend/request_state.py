@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 JsonObject = dict[str, Any]
 
 COMMENT_STATUSES = ("new", "sent", "done")
-REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# ``\Z``, not ``$``: ``$`` also matches before a trailing newline, which would let
+# "abc\n" pass as a request id, be looked up as a second id, and be stored as a
+# follow-up link.
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
 class PathEscape(ValueError):
@@ -410,6 +413,10 @@ def project_for_preview(runtime: Any, preview_url: str) -> tuple[JsonObject | No
         relative = url[marker_at + len(marker) :]
 
     relative = relative.split("?")[0].split("#")[0]
+    # The static handler serves the URL-decoded path, so the source file must be
+    # decoded the same way or `my%20page.html` names a file that does not exist.
+    # Encoded traversal still reaches `_contained_source`, which refuses it.
+    relative = runtime.unquote(relative)
     project_id = relative.split("/", 1)[0] if relative else ""
     rest = relative.split("/", 1)[1] if "/" in relative else ""
     project = next(

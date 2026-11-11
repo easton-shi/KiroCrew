@@ -28,7 +28,11 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from kiro_crew.agent_switch_command import ChannelAgentPicks, handle_channel_agent_command
+from kiro_crew.agent_switch_command import (
+    ChannelAgentPicks,
+    LiveDefaultAgent,
+    handle_channel_agent_command,
+)
 from kiro_crew.config import live
 from kiro_crew.config.sections import _normalize_threshold_pair
 from kiro_crew.feishu.client import CHAT_GROUP, CHAT_P2P
@@ -48,6 +52,7 @@ from kiro_crew.messaging.attachments import (
     transcribe_audio_attachments,
 )
 from kiro_crew.messaging.commands import (
+    COMPACT_ACCOUNT_CHANGED_REPLY_ZH,
     COMPACT_TIMED_OUT_REPLY_ZH,
     compact_unsupported_backend,
     compact_unsupported_reply_zh,
@@ -100,11 +105,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Canonical kiro-cli agent fallback so Feishu sessions load kirocrew-core
-# (spawn_run etc.) instead of kiro-cli's bare built-in default.  Mirrors the
-# Slack / Telegram / WeCom paths' _DEFAULT_KIROCREW_AGENT.
-_DEFAULT_KIROCREW_AGENT = "kirocrew"
-
 # /stop's three replies, worded as Weixin's. The cancel is COOPERATIVE: it only
 # writes session/cancel, so the turn stops at its next safe point -- hence
 # "stopping", not "stopped".
@@ -146,11 +146,14 @@ class FeishuDispatcher:
         # Set by maybe_start_feishu when a dashboard runs; the upload ceiling reads
         # the durable privacy flags through it.
         self.dashboard_state: Any = None
+        self._default_agent = LiveDefaultAgent()
         # Conversation state keyed by ROUTE rather than by sender: a group turn
         # must never share a bucket with the sender's private DM (see _route).
         # ``seed_fn`` recovers the highest generation already on disk so /new
         # advances past a stale one instead of resurrecting it after a restart.
-        self._conv: ConversationState[tuple[str, str]] = ConversationState(seed_fn=self._seed_gen)
+        self._conv: ConversationState[tuple[str, str]] = ConversationState(
+            seed_fn=self._seed_gen, bucket_fn=self._resolve_agent
+        )
         # Per-conversation agent picked with /agent, keyed by ROUTE like _conv,
         # because the agent is part of the session key.
         self._agent_picks: ChannelAgentPicks[tuple[str, str]] = ChannelAgentPicks()
@@ -269,7 +272,8 @@ class FeishuDispatcher:
                 route,
                 parts[1] if len(parts) == 2 else "",
                 conv=self._conv,
-                configured=self._resolve_agent(),
+                configured=self._configured_agent(),
+                running_default=self._configured_agent(route),
                 sessions=self.sessions,
                 session_key=lambda: self._session_key(route),
             )
@@ -552,7 +556,9 @@ class FeishuDispatcher:
         assert self.client is not None
         session_key = self._session_key(self._route(inbound))
         if not await self.sessions.try_acquire(session_key):
-            if self.sessions.has_session(session_key):
+            if self.sessions.is_retiring(session_key):
+                await self.client.send_reply(inbound.message_id, COMPACT_ACCOUNT_CHANGED_REPLY_ZH)
+            elif self.sessions.has_session(session_key):
                 await self.client.send_reply(
                     inbound.message_id, "⏳ 正在处理上一条消息，请稍后再试 /compact。"
                 )
@@ -596,9 +602,15 @@ class FeishuDispatcher:
         finally:
             self.sessions.release(session_key)
 
+    def _configured_agent(self, route: tuple[str, str] | None = None) -> str:
+        """The agent *route*'s current conversation runs with no ``/agent`` pick."""
+        return self.agent or self._default_agent.for_route(
+            self._conv, route, self.cfg, self._live_cfg
+        )
+
     def _resolve_agent(self, route: tuple[str, str] | None = None) -> str:
         """The agent *route* runs: its ``/agent`` pick, else the configured one."""
-        configured = self.agent or self.cfg.agent.default_agent or _DEFAULT_KIROCREW_AGENT
+        configured = self._configured_agent(route)
         return self._agent_picks.resolve(route, configured)
 
     @staticmethod

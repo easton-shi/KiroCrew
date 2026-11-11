@@ -7,12 +7,14 @@ The chat runner reads and writes these; this module declares their defaults.
 Instance fields of ``_ChatSlot`` this module reads and writes:
 
 Writes: ``_acp_pipe_death_retries``, ``_active_fallback_model``, ``_batch_rejected``,
-``_batch_rejected_cause``, ``_carried_ttft_clock``, ``_compaction_continue_retries``,
+``_batch_rejected_cause``, ``_carried_ttft_clock``, ``_compact_command_turn``,
+``_compaction_continue_retries``,
 ``_compaction_fail_cooldown_until``, ``_compaction_fail_streak``,
 ``_compaction_failed_retries``, ``_empty_episode_productive``,
 ``_empty_response_retries``, ``_end_wait_by``, ``_end_wait_request``,
 ``_fallback_candidate_idx``, ``_fallback_client_pick_epoch``, ``_fallback_pick_gen``,
-``_fallback_primary_model``, ``_fallback_slot_model``, ``_fallback_walked``,
+``_fallback_primary_model``, ``_fallback_slot_model``, ``_fallback_walk_refused``,
+``_fallback_walked``,
 ``_infra_retries``, ``_last_turn_model_refused_loop_gen``,
 ``_last_turn_model_refused_loop_id``, ``_last_turn_structural_terminal``,
 ``_last_turn_structural_terminal_loop_gen``, ``_last_turn_structural_terminal_loop_id``,
@@ -33,8 +35,8 @@ Writes: ``_acp_pipe_death_retries``, ``_active_fallback_model``, ``_batch_reject
 ``_steer_retract``, ``_steer_rpc_in_flight``, ``_steer_segment_cut``, ``_steer_send_ids``,
 ``_steer_user_origin``, ``_subagent_deliveries_inflight``,
 ``_subagents_inline_collected``, ``_synthesis_armers``,
-``_synthesis_completion_turns``, ``_synthesis_inflight``, ``_synthesis_recheck``,
-``_synthesis_rechecks``,
+``_synthesis_completion_turns``, ``_synthesis_final_turn_ran``, ``_synthesis_inflight``,
+``_synthesis_recheck``, ``_synthesis_rechecks``,
 ``_tool_stall_exhausted_emitted``, ``_tool_stall_retries``, ``_transient_5xx_retries``,
 ``_transient_ladder_started``, ``_turn_agent_started``, ``_turn_channel_narrowed``,
 ``_turn_channel_origin``, ``_turn_owner_sent``, ``_turn_retries``, ``_turn_user_sent``,
@@ -82,6 +84,9 @@ def init_ladder_fields(self: _ChatSlot) -> None:
     # result, so the turn-end fire gate drops the arm instead of running a
     # synthesis that restates it.
     self._synthesis_completion_turns = 0
+    # The newest turn took the batch's last result and ended on visible reply
+    # text (set by `_turn_record_outcome`, read by the same fire gate).
+    self._synthesis_final_turn_ran = False
     # Race guard: number of sub-agent completion deliveries
     # currently in flight for this slot (incremented in gateway._subagent_done
     # from entry until the completion is queued/launched). The synthesis
@@ -148,6 +153,13 @@ def init_ladder_fields(self: _ChatSlot) -> None:
     # the primary (deliberately NOT reset on turn completion).
     self._fallback_candidate_idx = 0
     self._fallback_walked = []
+    # Whether the SELECTED model's own ladder, the one that started the current
+    # walk, ended on a capacity/rollout refusal (``AcpError.model_unavailable``).
+    # Written at the walk's first swap and read only while ``_fallback_walked``
+    # is non-empty, so the terminal card is judged by the model a Resume would
+    # go back to (the restore probe re-selects the primary), not by whichever
+    # candidate failed last.
+    self._fallback_walk_refused = False
     self._active_fallback_model = ""
     self._fallback_primary_model = ""
     # Snapshot of slot.model taken when the fallback activated; it heals
@@ -313,6 +325,9 @@ def init_ladder_fields(self: _ChatSlot) -> None:
     # chunk entries above it, which _flush_segment's trailing-run walk could
     # then never reclaim). None when idle.
     self._steer_segment_cut = None
+    # True while this slot's turn runs a manual /compact (``_begin_compact_command``,
+    # cleared in _turn_release_handles): the turn runs no prompt, so a steer queues.
+    self._compact_command_turn = False
     # A segment cut a permission request owes: paid by ``append`` before the
     # next durable row, dropped when the request lands none. None when idle.
     self._owed_segment_cut = None

@@ -40,9 +40,9 @@ const ACTION_CREATORS = [
   'openActivityPanel', 'openActivityToTab', 'openActivityToTool', 'reconcileSubagentApprovalGone', 'reconcileSubagentQueuedFromSlots', 'reconcileWorkflowRuns',
   'removeAutomation', 'removeByApprovalId', 'removeQueuedMessage', 'removeThinking',
   'recordSendAttempt', 'reorderQueuedMessages', 'replaceMessages', 'requestFolderReveal', 'requestSlotFolderOpen', 'requestSlotReveal',
-  'resolveByApprovalId', 'resolveOptimisticSteer', 'resolveQuestionCard', 'retireSwappedRows', 'selectSubagent',
+  'resolveApprovalRow', 'resolveElicitationRow', 'resolveNativeApprovalRows', 'resolveOptimisticSteer', 'resolveQuestionCard', 'resolveShownApprovalRow', 'retireSwappedRows', 'selectSubagent',
   'setActiveSlot', 'setAgentSwitchNotice', 'setAutomations', 'setCloseRefused', 'setFolderSuggestion',
-  'setFollowupCard', 'setPendingInput', 'setQuestionCard', 'setQuestionDraft', 'setQuestionNotice', 'setQuestionRequestInFlight', 'setSidePanelAlwaysOpen', 'setSlotRunning',
+  'setFollowupCard', 'setPendingInput', 'setQuestionCard', 'setQuestionDraft', 'setQuestionNotice', 'setQuestionRequestInFlight', 'setSidePanelAlwaysOpen', 'setSlotRunning', 'setSubagentApprovalTarget',
   'setSlotState', 'setSlotStatusDetail', 'setSlotStopping', 'setStopPressedAt', 'setSwitchSlotGone', 'setVoiceAudio',
   'setVoicePlaying', 'setVoicePreparing', 'settleStopNotRunning', 'sideClose', 'sideClosedElsewhere', 'sideOptimisticAccepted', 'sideOptimisticAppend',
   'sideOptimisticRollback', 'sideReleaseConsumed', 'sideRestore', 'sideRestoreReading', 'sideResync', 'sideSendStatus', 'sseActivityEvent', 'sseAutomation',
@@ -65,6 +65,7 @@ const THUNKS: Record<string, string> = {
   forkSlot: 'chat/forkSlot',
   loadOlderMessages: 'chat/loadOlder',
   loadOlderSlotMessages: 'chat/loadOlderSlot',
+  promoteSlot: 'chat/promoteSlot',
   refreshSlot: 'chat/refreshSlot',
   requestStop: 'chat/requestStop',
   reconcileGoneSubagent: 'chat/reconcileGoneSubagent',
@@ -77,7 +78,7 @@ const THUNKS: Record<string, string> = {
 
 const FUNCTIONS = [
   'abortActiveOlderFetch', 'batchedTextAboveFloor', 'beginSideQueueEdit', 'capturePendingAskId', 'clampToolOutput',
-  'countMatchedFetchLimit', 'finishSideQueueEdit', 'floorForGen', 'forgetSideSteerSubmittedText', 'hasUnidentifiedDurableRow', 'hydrateQueuedBubbles', 'isActiveSubagent', 'isAnsweredQuestionEnding', 'isAwaitingSpawnApproval', 'isSpawnApprovalGone', 'isSpawnApprovalRetired',
+  'countMatchedFetchLimit', 'finishSideQueueEdit', 'floorForGen', 'forgetSideSteerSubmittedText', 'hasUnidentifiedDurableRow', 'hydrateQueuedBubbles', 'isActiveSubagent', 'isAnsweredQuestionEnding', 'isAwaitingSpawnApproval', 'isDurableRow', 'isSpawnApprovalGone', 'isSpawnApprovalRetired',
   'captureForkOrigin', 'forkMayOpen', 'isSupersededPagingRejection', 'isTerminalWorkflowStatus', 'listForkedSlot', 'mcpAppKey', 'missedChunkMarker', 'normalizeQueueEntries',
   'noteSideQueueCancelWaiting', 'noteSideQueueDroppedByClose', 'openCreatedSlot', 'pendingQuestionFor', 'queueEditBroadcastAt', 'queueEntryAttachments', 'queueEntryBanner', 'queueEntryPastes', 'queueEntryQuote', 'raiseChunkSeq', 'readSideSteerSubmittedText', 'recordSideSteerSubmittedText', 'resumeStillOpening', 'setSideQueueEditDraft',
   'selectActiveSlotProject', 'selectAutomationForSlot', 'selectComposerBusy', 'selectContinuable',

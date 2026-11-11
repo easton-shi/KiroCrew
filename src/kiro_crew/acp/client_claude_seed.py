@@ -10,7 +10,8 @@ and a patch of the method on the class or on an instance reaches every caller.
 Instance fields written: ``_claude_inline_settings``,
 ``_claude_local_settings_excluded``, ``_claude_settings_authored``,
 ``_claude_settings_claim_unrevoked``, ``_claude_settings_shared``,
-``_claude_settings_written``, ``_permission_surface_share_validated``.
+``_claude_settings_written``, ``_permission_surface_share_validated``,
+``claude_mode_pinned_notice``.
 
 Instance fields read: ``_agent``, ``_model``, ``_permission_mode``, ``_seed_owner``,
 ``_session_key``, ``_work_dir``.
@@ -441,6 +442,7 @@ def _write_claude_local_settings(self: AcpClient) -> None:
     # Re-decided on every run; only the foreign-file branch below sets it.
     self._claude_local_settings_excluded = False
     self._claude_inline_settings = None
+    self.claude_mode_pinned_notice = ""
     if not _claude_settings_usable(local_settings):
         # A symlink, or a sensitive resolved target: creating the file would
         # follow the link and write Crew's settings through it. Left entirely
@@ -797,7 +799,9 @@ def _write_claude_local_settings(self: AcpClient) -> None:
                         break
                     time.sleep(0.05)
                 self._invalidate_session_mcp_projection()
-                self._log_declined_share(local_settings)
+                # The same guarded exclusion as a file that was there before.
+                if not self._exclude_foreign_local_settings(local_settings, payload):
+                    self._log_declined_share(local_settings)
                 return
             with os.fdopen(fd, "wb") as handle:
                 handle.write(payload.encode("utf-8"))

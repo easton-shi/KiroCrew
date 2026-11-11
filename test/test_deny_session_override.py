@@ -48,7 +48,13 @@ from kiro_crew.dashboard.deny_override import (
     slot_deny_waivers,
     slot_may_override,
 )
-from kiro_crew.hooks import TOOL_DENY, HookManager, HooksConfig, ToolHookResult
+from kiro_crew.hooks import (
+    HOOK_EVENT_PRE_TOOL_USE,
+    TOOL_DENY,
+    HookManager,
+    HooksConfig,
+    ToolHookResult,
+)
 from kiro_crew.providers.base import EVENT_PERMISSION_REQUEST, EVENT_TEXT_CHUNK, LLMEvent
 from kiro_crew.security import is_denied
 from kiro_crew.security.denied_rules import DENY_REASON_PREFIX
@@ -392,6 +398,72 @@ async def _run_answered(state, slot, answer: str):
         await _drain(task)
 
 
+class TestOverrideIsNeverRelayedToACodeChannel:
+    @pytest.mark.asyncio
+    async def test_a_code_channel_workers_override_card_stays_on_the_dashboard(
+        self, tmp_path, monkeypatch
+    ):
+        """A Slack Code channel relays its workers' prompts into the channel, but
+        an override is answered on the dashboard alone (as the linked mirror
+        rules): a Slack Approve would be read as a decline under an approved card."""
+        # The turn resolves the relay through chat_runner's composed namespace.
+        from kiro_crew.dashboard import chat_runner
+
+        _no_pins(monkeypatch)
+        state, client = _make_state(tmp_path, context_builder=_scripted_gate([_RM_ROOT]))
+        slot = _make_slot()
+        slot._created_by = "chat-1-1"  # a worker a code channel's session created
+        relayed: list[object] = []
+
+        def relay(*args, **kwargs):
+            relayed.append(args)
+            return None
+
+        monkeypatch.setattr(chat_runner, "start_worker_approval_relay", relay)
+        _set_stream(client, _stream())
+
+        await _run_answered(state, slot, "deny_override_once")
+
+        assert _permission_rows(slot), "the override card is still shown on the dashboard"
+        assert relayed == []
+        client.approve_tool.assert_called_once_with("req-1", deny_waivers=frozenset({_RM_ROOT}))
+
+    @pytest.mark.asyncio
+    async def test_a_relayed_mcp_prompt_carries_its_trusted_identity(self, tmp_path, monkeypatch):
+        """The runner hands the relay the event's MCP identity, so the channel's
+        card names the proven server/tool, not only the model-written title."""
+        from kiro_crew.dashboard import chat_runner
+
+        _no_pins(monkeypatch)
+        state, client = _make_state(tmp_path, context_builder=_scripted_gate([]))
+        slot = _make_slot()
+        slot._created_by = "chat-1-1"
+        relayed: list[dict] = []
+
+        def relay(*args, **kwargs):
+            relayed.append(kwargs)
+            return None
+
+        monkeypatch.setattr(chat_runner, "start_worker_approval_relay", relay)
+        event = _shell_event(
+            title="email_send",
+            tool_kind="other",
+            tool_input="{}",
+            is_shell=False,
+            mcp_server_name="mail",
+            tool_name="send",
+            mcp_identity_trusted=True,
+        )
+        _set_stream(client, _stream(event))
+
+        await _run_answered(state, slot, "approved")
+
+        assert relayed, "the prompt reached the code-channel relay"
+        assert relayed[-1]["mcp_server_name"] == "mail"
+        assert relayed[-1]["tool_name"] == "send"
+        assert relayed[-1]["mcp_identity_trusted"] is True
+
+
 class TestDashboardOverrideCard:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["normal", "trust", "yolo"])
@@ -417,6 +489,40 @@ class TestDashboardOverrideCard:
         client.approve_tool.assert_called_once_with("req-1", deny_waivers=frozenset({_RM_ROOT}))
         client.reject_tool.assert_not_called()
         assert slot._deny_waivers == set()
+
+    @pytest.mark.asyncio
+    async def test_an_override_card_gets_no_chat_app_buttons(self, tmp_path, monkeypatch):
+        # A plain Approve from a chat app refuses an override card's call, so the
+        # bridged note must not offer one: the dashboard alone answers it.
+        _no_pins(monkeypatch)
+        handed: list[dict] = []
+        monkeypatch.setattr(
+            "kiro_crew.notifications.bridge_approval_note.schedule_pending_approval",
+            lambda state, fut, **kw: handed.append(kw),
+        )
+        state, client = _make_state(tmp_path, context_builder=_scripted_gate([_RM_ROOT]))
+        slot = _make_slot()
+        _set_stream(client, _stream())
+
+        await _run_answered(state, slot, "deny_override_once")
+
+        [kw] = handed
+        assert kw["answerable"] is False
+
+    @pytest.mark.asyncio
+    async def test_card_asks_for_no_rejection_reason(self, tmp_path, monkeypatch):
+        # Its rejection is the rule's own refusal, which carries no reason, so a
+        # KAS request that takes one still gets no reason box on this card.
+        _no_pins(monkeypatch)
+        state, client = _make_state(tmp_path, context_builder=_scripted_gate([_RM_ROOT]))
+        slot = _make_slot()
+        _set_stream(client, _stream(_shell_event(takes_rejection_reason=True)))
+
+        await _run_answered(state, slot, "rejected")
+
+        meta = json.loads(_permission_rows(slot)[0]["cls"])
+        assert meta[DENY_OVERRIDE_META_KEY] == _RM_ROOT
+        assert "rejection_reason_accepted" not in meta
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("answer", ["approved", "approved_trust_reads", "rejected"])
@@ -467,6 +573,63 @@ class TestDashboardOverrideCard:
         client.approve_tool.assert_not_called()
         client.reject_tool.assert_called_once()
         assert any(_CHMOD_777 in (m.get("content") or "") for m in slot.messages)
+
+    @pytest.mark.asyncio
+    async def test_pre_tool_use_fires_once_for_each_card_answered(self, tmp_path, monkeypatch):
+        """An ordinary card's call had its PreToolUse fire at the gate, before the card;
+        an override card is drawn before that fire, so its approval fires it. A later call
+        in the same turn is judged on its own: the first call's fire does not cover it."""
+        _no_pins(monkeypatch)
+
+        def _judge(title, **kw):
+            if "rm -rf" in title and _RM_ROOT not in kw.get("deny_waivers", frozenset()):
+                verdict = ToolHookResult.deny(f"{DENY_REASON_PREFIX}{_RM_ROOT}")
+                verdict.tier = "deny-rules"
+                return verdict
+            return ToolHookResult.allow()
+
+        cb = MagicMock()
+        cb.hooks.on_tool_call.side_effect = _judge
+        cb.build_message.return_value = ("hello", None)
+        state, client = _make_state(tmp_path, context_builder=cb)
+        slot = _make_slot()
+        ordinary = _shell_event(
+            title="Running: touch notes.txt",
+            tool_input=json.dumps({"command": "touch notes.txt"}),
+        )
+        _set_stream(client, [ordinary, *_stream(_shell_event(request_id="req-2"))])
+        import asyncio
+
+        answers = [
+            asyncio.create_task(_answer_approval(slot, "req-1", "approved")),
+            asyncio.create_task(_answer_approval(slot, "req-2", "deny_override_once")),
+        ]
+        try:
+            with _patch_stats():
+                await finished(
+                    _run_chat(
+                        state,
+                        slot,
+                        "hello",
+                        _directive_user_origin=True,
+                        _directive_owner_origin=True,
+                    ),
+                    "the chat turn completing",
+                )
+            for task in answers:
+                await await_until(task, what="a card being answered")
+        finally:
+            for task in answers:
+                await _drain(task)
+
+        pre_inputs = [
+            call.kwargs.get("tool_input")
+            for call in state._hook_store.fire.await_args_list
+            if call.args[0] == HOOK_EVENT_PRE_TOOL_USE
+        ]
+        assert pre_inputs == [{"command": "touch notes.txt"}, {"command": "rm -rf /"}]
+        assert client.approve_tool.call_count == 2
+        client.reject_tool.assert_not_called()
 
 
 class TestDenyKeyFamily:
@@ -1231,7 +1394,13 @@ class TestApproveRouteEndToEnd:
             if c.args[0] == "approval_resolved"
         ]
         assert frames == [
-            {"id": "rid-1", "approved": True, "slot": slot.key, "mid": body["request_mid"]}
+            {
+                "id": "rid-1",
+                "approved": True,
+                "slot": slot.key,
+                "mid": body["request_mid"],
+                "origin": "native",
+            }
         ]
 
     @pytest.mark.asyncio

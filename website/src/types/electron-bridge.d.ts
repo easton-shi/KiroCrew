@@ -49,6 +49,9 @@ declare global {
     onBootReady: (cb: () => void) => () => void
     bootComplete: () => void
     setThemeAccent: (hex: string) => void
+    /** Hand the shell the active theme pack's boot-splash art, or null when it
+     *  ships none. Optional: absent on a shell older than the feature. */
+    setThemeSplash?: (image: { type: string; bytes: Uint8Array } | null) => void
     setThemeMode: (pref: string) => void
     setTitleBarOverlayTheme: (mode: string) => void
     setFocusModeChrome: (visible: boolean) => void
@@ -115,6 +118,23 @@ declare global {
   interface RemoteCrewSetupAPI {
     available: () => Promise<boolean>
     start: () => Promise<'switching' | 'cancelled' | 'unavailable'>
+  }
+
+  /** Settings → About's Restart gateway for the gateway this desktop app runs.
+   *  `available` is true only where `restart` can work; "restarting" means the
+   *  app is replacing this page with its splash and will reconnect. Absent in
+   *  plain browsers and in windows on another machine's gateway. */
+  interface GatewayRestartAPI {
+    available: () => Promise<boolean>
+    restart: () => Promise<'restarting' | 'unavailable'>
+  }
+
+  /** Remote Crew pane ports the desktop app's managed SSH forward carries in
+   *  client-only mode. `forwardPorts` names the ports this window's panes load
+   *  and resolves once each has been tried: `up` or `down` per port, or null
+   *  where the app keeps no forward. See lib/paneForward.ts. */
+  interface RemoteCrewPaneAPI {
+    forwardPorts: (ports: number[]) => Promise<Record<string, 'up' | 'down'> | null>
   }
 
   interface CrashReportsAPI {
@@ -250,6 +270,9 @@ declare global {
     version?: string
     notes?: string
     pubDate?: string
+    // On the feed lane's `found`: whether the automatic download follows, as the
+    // main process decided it. Absent from an older shell and from the managed lane.
+    autoDownload?: boolean
     channel?: string
     message?: string
     phase?: 'check' | 'download' | 'install'
@@ -275,7 +298,7 @@ declare global {
     channel?: string
     stampedChannel?: string | null
     channelSwitchable?: boolean
-    // The organization's policy sets the channel (an enterprise build).
+    // The organization's policy sets the channel (an LTS build).
     channelLockedByPolicy?: boolean
     // The channel the policy requires, "" when none.
     requiredChannel?: string
@@ -322,6 +345,8 @@ declare global {
     closeActionAPI?: CloseActionAPI
     trayIconAPI?: TrayIconAPI
     remoteCrewSetupAPI?: RemoteCrewSetupAPI
+    gatewayRestartAPI?: GatewayRestartAPI
+    remoteCrewPaneAPI?: RemoteCrewPaneAPI
     crashReportsAPI?: CrashReportsAPI
     wslAPI?: WslAPI
     folderPickAPI?: FolderPickAPI

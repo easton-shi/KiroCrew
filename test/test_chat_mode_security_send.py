@@ -277,6 +277,8 @@ _TURN_ONLY_BODY_KEYS = frozenset(
         "send_now",
         # A display label for this send's row; the slot keeps nothing.
         "banner",
+        # Read only on a person's send, for a conversation the send begins.
+        "embed_app",
     }
 )
 _SETTINGS_BODY_KEYS: dict[str, object] = {
@@ -668,7 +670,7 @@ async def test_app_send_refused_when_the_slot_closes_during_the_permission_read(
     reading = threading.Event()
     release = threading.Event()
 
-    def gated_grant(_app: str) -> bool:
+    def gated_grant(_app: str, **_kw: object) -> bool:
         reading.set()
         assert release.wait(5)
         return True

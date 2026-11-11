@@ -8,6 +8,7 @@ Instance fields of ``_ChatSlot`` this module reads and writes:
 
 Writes: ``_acp_client``, ``_active_turn_session_key``, ``_approval_futures``,
 ``_approval_instances``, ``_approval_stopped``, ``_buffers``, ``_chunk_seq``,
+``_close_recorded``,
 ``_closing``, ``_compacting``, ``_coordinator_approvals``, ``_cycle_reached_provider``,
 ``_dashboard_card_exempt``, ``_dashboard_card_identity``, ``_deferred_notes``,
 ``_dropped_note_ids``, ``_embed_question_polled_at``, ``_file_changes``,
@@ -23,7 +24,7 @@ Writes: ``_acp_client``, ``_active_turn_session_key``, ``_approval_futures``,
 ``_pending_context``, ``_pending_release_deferred``, ``_pending_variants``,
 ``_question_pending``, ``_queue``, ``_queue_persist_inflight``, ``_queue_persist_owed``,
 ``_queue_persisted_sig``, ``_queue_repository``, ``_regenerate_target``,
-``_responsive``, ``_side``,
+``_rejection_reasons``, ``_responsive``, ``_side``,
 ``_stop_declined_at``, ``_stop_escalated_card_id``, ``_stop_event_id``,
 ``_stop_generation``, ``_stop_state_raw``, ``_subagent_delivery_pending``, ``_swap_in_flight``,
 ``_synthesis_recheck``, ``_task``, ``_trust``, ``_trust_reads``, ``_trust_scope``,
@@ -51,7 +52,7 @@ import traceback
 import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple
 
 from kiro_crew.dashboard.slot_buffers import SlotBufferCoordinator
 from kiro_crew.dashboard.slot_queue_repository import EMPTY_QUEUE_SIGNATURE, SlotQueueRepository
@@ -144,6 +145,29 @@ def _log_task_exception(task: asyncio.Task[Any]) -> None:
 # An arrival over this is refused, not admitted by evicting a seated entry
 # the caller already holds a 200 for.
 _MAX_PENDING_CONTEXT = 50
+# Process-local replay guards outlive their queue seats: a stamped guard still
+# answers a hydration that read the hold before the stamp, and an unstamped one
+# holds back every twin until the write lands. Bound the registry independently
+# of slot count, and evict the stamped ones first (_register_consumed_merge_contexts).
+_MAX_CONSUMED_MERGE_CARDS = 512
+# Live entries one source may hold in that queue. Shared by the /context and
+# /note admission checks and by the turn that takes its session's note
+# context from another slot, so one prompt is bounded as one queue is.
+_MAX_CONTEXT_PER_SOURCE = 10
+
+
+class _ConsumedMergeCard(NamedTuple):
+    """One merge card's process-local replay guard.
+
+    ``transcript`` is the key the card was consumed on, matched by file.
+    ``stamped`` says its durable ``consumed`` stamp has been proven, which makes
+    the guard the cheaper one to evict: it then only answers a hydration that
+    read the hold before the stamp, where an unstamped guard is the whole
+    protection until the write lands.
+    """
+
+    transcript: str
+    stamped: bool = False
 
 
 def context_entry_expired(entry: dict, now: float) -> bool:
@@ -199,6 +223,8 @@ def init_turns_fields(self: _ChatSlot) -> None:
     # I/O. A DEPTH: two retractions can overlap on one slot, and each must
     # release only its own acquisition (see ``begin_close``).
     self._closing = 0
+    # See ``note_close_recorded`` and ``metadata_line.keeps_own_close``.
+    self._close_recorded = False
     # This turn's tool results, reduced to sources and credential
     # fingerprints, so a credential in the reply can name where it came
     # from. Memory only and cleared at every turn start; see
@@ -291,6 +317,10 @@ def init_turns_fields(self: _ChatSlot) -> None:
     # accumulates and a later human rejection on this slot cannot inherit the
     # attribution. Ids rather than a flag, for exactly that reason.
     self._approval_stopped = set()
+    # The reason a person typed with a rejection, keyed by request id and bound
+    # to the exact future it answered, so a reused id cannot inherit it. Written
+    # where the rejection is accepted and taken where the runner reads it.
+    self._rejection_reasons = {}
     self._trust = False  # auto-approve tools for this slot
     # True when ``_trust`` came from a Crew Mode conductor's approval card
     # ("Trust this crew member"). That grant covers this slot and the subagents it
@@ -428,11 +458,11 @@ def init_turns_fields(self: _ChatSlot) -> None:
     # completion. See ``take_pending_subagent_deliveries``.
     self._subagent_delivery_pending = {}
     self._pending_context = []
+    self._inflight_merge_contexts = []
     self._deferred_notes = []
-    # Note ids dropped at the flush's rebind seam. A dropped
-    # note has no delivery obligation left, but its durable entry may only
-    # be retired by a save — the ids recorded here are how the next full
-    # save knows to retire entries whose rows will never exist.
+    # Note ids whose remaining delivery obligation ended without a row-based
+    # retirement: rebind drops and committed plain notes restored from disk.
+    # The next full save removes their durable hold entries unconditionally.
     self._dropped_note_ids = set()
     # Regenerate feature: variants pending attachment to next finalized assistant message
     self._pending_variants = []
@@ -569,6 +599,11 @@ def cancel_close(self: _ChatSlot) -> None:
     self._closing = max(0, self._closing - 1)
 
 
+def note_close_recorded(self: _ChatSlot) -> None:
+    """Mark this slot's close committed; the archive calls it under the transcript lock."""
+    self._close_recorded = True
+
+
 def push_wire_frame(self: _ChatSlot, cls: str, content: str) -> None:
     """Queue an ephemeral frame for live SSE readers only."""
     self._buffers.push_wire_frame(self, cls, content)
@@ -604,10 +639,11 @@ def purge_chunks(self: _ChatSlot) -> int:
 def has_pending_context_seat(self: _ChatSlot) -> bool:
     """True if one more entry fits the queue's seat ceiling.
 
-    Counts live entries plus each held note's context half, because the
-    deferred-note flush promotes that half into this same queue -- without the
-    reservation a later arrival takes the seat the flush needs and the note's
-    context is lost after its 200.
+    Counts live entries, each held note's context half, and each merge-card
+    context a running turn has taken (``_inflight_merge_contexts``), because the
+    deferred-note flush promotes that half into this same queue and a turn that
+    does not land puts its merge cards back at the front -- without the
+    reservation a later arrival takes a seat one of them needs.
     """
     now = time.time()
     seats = sum(1 for e in self._pending_context if not context_entry_expired(e, now))
@@ -615,6 +651,9 @@ def has_pending_context_seat(self: _ChatSlot) -> bool:
         ctx = note.get("context")
         if isinstance(ctx, dict) and not context_entry_expired(ctx, now):
             seats += 1
+    seats += sum(
+        1 for entry in self._inflight_merge_contexts if not context_entry_expired(entry, now)
+    )
     return seats + 1 <= _MAX_PENDING_CONTEXT
 
 
@@ -700,6 +739,22 @@ def unregister_approval(self: _ChatSlot, request_id: str, future: asyncio.Future
     if instance is not None and instance[0] is future:
         self._approval_instances.pop(request_id)
     return owned
+
+
+def set_rejection_reason(
+    self: _ChatSlot, request_id: str, future: asyncio.Future[str], reason: str
+) -> None:
+    """Keep *reason* for the rejection of *future*, until the runner takes it."""
+    self._rejection_reasons[request_id] = (future, reason)
+
+
+def take_rejection_reason(self: _ChatSlot, request_id: str, future: asyncio.Future[str]) -> str:
+    """The reason kept for *future*'s rejection, removed; ``""`` when none was."""
+    kept = self._rejection_reasons.get(request_id)
+    if kept is None or kept[0] is not future:
+        return ""
+    del self._rejection_reasons[request_id]
+    return kept[1]
 
 
 def mark_permission_resolved(self: _ChatSlot, approval_id: str, decision: str = "approved") -> None:

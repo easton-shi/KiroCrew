@@ -21,6 +21,11 @@ const { detectWsl2 } = require("./wsl-detection");
 const { crashNoticeSummary } = require("./crash-collector");
 const { PREFIX: PANE_ASSETS_PREFIX, purgeableOrigin } = require("./pane-asset-journal");
 const { safeFilename } = require("./download-handler");
+const { saveThemeSplash } = require("./theme-splash");
+const { createRelayCrewOpener, isEndpointId } = require("./relay-crew-open");
+const { requestRelayCrewToken } = require("./relay-crew-client");
+const { openRelayCrewWindow, createTokenHolder } = require("./relay-crew-window");
+const { createRelayCrewRenewal } = require("./relay-crew-renewal");
 
 /**
  * Register the Electron shell's renderer bridges without taking ownership of
@@ -58,6 +63,9 @@ function createIpcRegistrar({
   // build). See runtime/update/policy-channel.js.
   getRequiredChannel = requiredUpdateChannelFor(),
   clipboardImageTimeoutMs = 1000,
+  // The relay Crew opener behind `relay-crew:open`. Built on first use from the
+  // injected Electron when absent; tests pass a fake.
+  relayCrewOpenerOverride = null,
 } = {}) {
   if (!electron) throw new Error("createIpcRegistrar: electron is required");
   if (!store) throw new Error("createIpcRegistrar: store is required");
@@ -167,6 +175,24 @@ function createIpcRegistrar({
     }
   };
 
+  let relayOpener = relayCrewOpenerOverride;
+  const relayCrewOpener = () => {
+    if (!relayOpener) {
+      const { BaseWindow, WebContentsView, session } = electron;
+      const windowDeps = { BaseWindow, WebContentsView, session, shell, log };
+      relayOpener = createRelayCrewOpener({
+        requestToken: (endpointId, signInMarker) => requestRelayCrewToken({
+          backendUrl, endpointId, signInMarker, getSecret: readInternalSecret, fetchFn,
+        }),
+        openWindow: (opts) => openRelayCrewWindow(opts, windowDeps),
+        createRenewal: createRelayCrewRenewal,
+        createTokenHolder,
+        log,
+      });
+    }
+    return relayOpener;
+  };
+
   setGlobalHotkeyLogger(log);
   const summonDashboard = createSummonHandler({
     getWindow: () => (
@@ -247,6 +273,8 @@ function createIpcRegistrar({
 
     ipcMain.on("theme-accent-changed", (_event, hex) =>
       windows.chrome.setThemeAccent(hex));
+    ipcMain.on("theme-splash-changed", (_event, image) =>
+      saveThemeSplash(app.getPath("userData"), image));
     ipcMain.on("focus-mode-chrome", (event, visible) =>
       windows.chrome.focusMode(event.sender, visible));
     // Arm/disarm the off-window cursor poll that dismisses a focus-mode reveal.
@@ -400,6 +428,44 @@ function createIpcRegistrar({
         log(`${PANE_ASSETS_PREFIX} clear-http-cache origin=${target} failed: ${e && e.message}`);
         return false;
       }
+    });
+
+    // Forward the Remote Crew pane ports a window on the launch port shows.
+    // In client-only mode that window's dashboard is a crew's gateway reached
+    // through the app's managed forward, and each pane it frames loads a port
+    // the crew's gateway opened on ITS machine, so the managed keeper must
+    // carry those ports too (tunnel-keeper.js). Admitted only from a top frame
+    // on the launch port's own dashboard origin, the one window the keeper's
+    // forward serves; a pane, an embedded page or another port's window is
+    // refused. The keeper itself answers null when this app keeps no forward
+    // for the launch port, so a local gateway's dashboard asks once and loads.
+    // A window's ports are released when it is destroyed.
+    const paneForwardSenders = new Set();
+    ipcMain.handle("remote-crew:forward-pane-ports", async (event, ports) => {
+      const channel = "remote-crew:forward-pane-ports";
+      const sender = event && event.sender;
+      if (!sender || !event.senderFrame || event.senderFrame !== sender.mainFrame) {
+        log(`${channel} rejected: sender is not a top frame`);
+        throw new Error(`${channel} is restricted to the launch port's dashboard`);
+      }
+      let origin = "";
+      try {
+        origin = new URL(event.senderFrame.url).origin;
+      } catch { /* an unreadable URL matches nothing */ }
+      if (origin !== backendUrl) {
+        log(`${channel} rejected for sender origin ${origin || "(unreadable)"}`);
+        throw new Error(`${channel} is restricted to the launch port's dashboard`);
+      }
+      if (typeof gateway.forwardPanePorts !== "function") return null;
+      const owner = sender.id;
+      if (!paneForwardSenders.has(owner) && typeof sender.once === "function") {
+        paneForwardSenders.add(owner);
+        sender.once("destroyed", () => {
+          paneForwardSenders.delete(owner);
+          gateway.releasePaneForwards(owner);
+        });
+      }
+      return gateway.forwardPanePorts(owner, ports);
     });
 
     // WSL2 host-runtime readout, rendered read-only by the Host runtime card.
@@ -633,6 +699,24 @@ function createIpcRegistrar({
       return gateway.switchToRemoteCrew(windows.windowForWebContents(event.sender));
     });
 
+    // Settings → About's Restart gateway. It stops and respawns the gateway this
+    // app runs, so it takes the same three-gate check, and the supervisor alone
+    // decides from its own state whether the sender's window may restart: the
+    // main window, connected to a gateway this app spawned. `can-...` answers a
+    // bare boolean so About shows the control only where the restart works.
+    ipcMain.handle("gateway:can-restart", async (event) => {
+      try {
+        await assertLocalDashboard(event, "gateway:can-restart");
+      } catch {
+        return false;
+      }
+      return gateway.canRestartGateway(windows.windowForWebContents(event.sender)) === true;
+    });
+    ipcMain.handle("gateway:restart", async (event) => {
+      await assertLocalDashboard(event, "gateway:restart");
+      return gateway.restartGateway(windows.windowForWebContents(event.sender));
+    });
+
     // Open the user's own terminal app in a project directory. Gated like
     // `dashboard:open-file` because it is a LAUNCH on the machine in front of
     // the user, and a connection window pointed at a remote gateway shares this
@@ -669,6 +753,23 @@ function createIpcRegistrar({
         fetchFn,
         log,
       });
+    });
+
+    // Open a remote Crew reached through the Kiro relay, in its own window
+    // (relay-crew-open.js). The renderer sends only the endpoint ID; main asks
+    // this shell's own gateway for the access token with the local secret, so
+    // neither the token nor the Crew URL crosses the bridge. Gated like
+    // `external-terminal:open`, because a connection window pointed at a
+    // remote gateway shares this preload. Never rejects: the dashboard gets
+    // `{ ok }` or `{ ok: false, error }`.
+    ipcMain.handle("relay-crew:open", async (event, endpointId) => {
+      if (!isEndpointId(endpointId)) return { ok: false, error: "INVALID_ENDPOINT" };
+      try {
+        await assertLocalDashboard(event, "relay-crew:open");
+      } catch {
+        return { ok: false, error: "UNAVAILABLE" };
+      }
+      return relayCrewOpener().open(endpointId);
     });
 
     ipcMain.handle("zoom:get", (event) =>

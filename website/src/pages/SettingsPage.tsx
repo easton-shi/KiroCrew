@@ -5,6 +5,7 @@ import { useAppSelector } from '../store'
 import SidePanelLayout from '../components/SidePanelLayout'
 import { SUBNAV_PARAM, SUBNAV_LEGACY_PARAMS, deleteSubSelection, toPathSegment, parsePathSegments } from '../components/subNavParams'
 import { useSettingHighlight } from '../hooks/useSettingHighlight'
+import { RemoteControlCard } from './settings/RemoteControlCard'
 import { RemoteCrewPanel } from './settings/RemoteCrewPanel'
 import { PeoplePanel } from './settings/PeoplePanel'
 import { useSharedCrewCapabilities } from '../hooks/sharedCrew/useSharedCrew'
@@ -60,6 +61,7 @@ import { SettingsCard } from '../components/settings'
 
 import { i18nT } from '../i18n/t'
 import { usePreviewFlag } from '../hooks/usePreviewFlag'
+import { useConfigPendingCount } from './settings/configPendingQuery'
 import { PREVIEW_SESSION_ENVIRONMENTS, PREVIEW_WEBHOOKS } from '../utils/previewFlags'
 import { GuideTrustRootRegion } from '../guide/trustRoot'
 // Group headers double as the grouping KEY (SidePanelLayout starts a new header
@@ -235,6 +237,10 @@ export default function SettingsPage() {
   // `=== true` is required, not cosmetic: the gateway sends null for a check that
   // never ran or failed, and a truthiness test would keep that dark while a
   // `!== false` test would light it on no evidence.
+  // Every `kirocrew://remote-crew/add` link remounts Remote Crew, so a panel
+  // already on screen comes back on its first tab with the newest link's values
+  // in its add form.
+  const crewAddLinkSeq = useAppSelector(s => s.instances.crewForms?.addLinkSeq ?? 0)
   const gatewayUpdateAvailable = useAppSelector(s => s.dashboard.status?.update_available)
   const desktopUpdateAvailable = useAppSelector(s => s.dashboard.desktopUpdateAvailable)
   const updateAvailable = gatewayUpdateAvailable === true || desktopUpdateAvailable
@@ -255,7 +261,15 @@ export default function SettingsPage() {
     && (t.key !== 'session-environments' || sessionEnvironmentsPreview)
     && (t.key !== 'people' || sharedCrewPreview),
   )
-  const tabs = updateAvailable ? allTabs.map(t => (t.key === 'about' ? { ...t, dot: true } : t)) : allTabs
+  // Review nudge: dot on the Security entry while a settings file edited outside
+  // the dashboard waits for Apply or Discard there.
+  const configPending = useConfigPendingCount() > 0
+  const tabs = allTabs.map(t => (
+    t.key === 'about' && updateAvailable ? { ...t, dot: true }
+      : t.key === 'security' && configPending
+        ? { ...t, dot: true, dotLabel: i18nT('pages.settings.securityPanel.configPending.nav_dot') }
+        : t
+  ))
 
   const memorySelection = new URLSearchParams(search)
   const memberMemoryView = pathname.replace(/\/$/, '') === '/settings/overview'
@@ -319,7 +333,12 @@ export default function SettingsPage() {
         )}
         {tab === 'computer-use' && <GuideTrustRootRegion><ComputerUsePanel /></GuideTrustRootRegion>}
         {tab === 'webhooks' && <WebhooksPanel />}
-        {tab === 'instances' && <RemoteCrewPanel />}
+        {tab === 'instances' && (
+          <>
+            <RemoteControlCard />
+            <RemoteCrewPanel key={crewAddLinkSeq} />
+          </>
+        )}
         {tab === 'people' && sharedCrewPreview && <PeoplePanel />}
         {tab === 'privacy' && <PrivacyPanel />}
         {tab === 'security' && <GuideTrustRootRegion><SecurityPanel basePath={SETTINGS_BASE_PATH} /></GuideTrustRootRegion>}

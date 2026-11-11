@@ -321,35 +321,48 @@ def test_a_shell_call_whose_command_was_not_recovered_is_never_granted() -> None
 # ── the patterns and the projection ───────────────────────────────────────────
 
 
-def test_only_the_subset_both_engines_read_alike_is_kept() -> None:
+def test_only_the_syntax_read_like_kiro_cli_is_kept() -> None:
     assert allowed_command_pattern(r"\Agit status\z") == r"\Agit status\z"
     # Verbatim: a pattern's own spaces are part of what it grants.
     assert allowed_command_pattern("ls -la ") == "ls -la "
+    # Rust's own syntax, read as Rust reads it (test_allowed_commands_rust_syntax).
+    for good in (
+        "rm [[:alpha:]]+",
+        "rm [[:alpha:]]",
+        r"ls \d+",
+        r"ls \w",
+        r"ls \D+",
+        r"ls \W",
+        r"ls \b",
+        "make a{2}",
+        "make a{2,}",
+        "make a{2}?",
+        "make a{257}",
+        "make a*?",
+        "make a+*",
+        "(?i)make",
+        "(?P<n>make)",
+        "make]",
+        "a^b",
+        "a$b",
+    ):
+        assert allowed_command_pattern(good) == good, good
     for bad in (
         "",
         "x" * 1025,
         "(unclosed",
         7,
         None,
-        # Rust reads a POSIX class; Python reads a set of the characters `[:alph`.
-        "rm [[:alpha:]]+",
-        "rm [[:alpha:]]",
-        r"ls \d+",
-        r"ls \w",
-        r"ls \b",
-        "make a{2}",
-        "make a{2,}",
-        "make a*?",
-        "make a+*",
         "*make",
         "make (*a)",
         "make (a|*b)",
-        "(?i)make",
-        "(?P<n>make)",
         "make)",
-        "make]",
-        "a^b",
-        "a$b",
+        "make a***",
+        "make a{,2}",
+        "make a{3,2}",
+        "make [\\d-z]",
+        "(?x)make",
+        r"ls \p{L}",
         "[]a]",
         "[]",
         "[^]",
@@ -377,8 +390,9 @@ def test_only_the_subset_both_engines_read_alike_is_kept() -> None:
     assert allowed_command_pattern("echo \u201chi\u201d") == "echo \u201chi\u201d"
 
 
-def test_a_pattern_outside_the_subset_grants_nothing() -> None:
-    """Python would read a POSIX class wider than kiro-cli does."""
+def test_a_posix_class_is_read_as_rust_reads_it() -> None:
+    """Python would read ``[[:alpha:]]`` as a set of the characters ``[:alph``
+    followed by a ``]``, wider than kiro-cli does."""
     event = _shell("rm a]")
     event.spec_granted_commands = ("rm [[:alpha:]]+",)
     verdict = HookManager(HooksConfig()).on_tool_call(event.title, **hook_gate_kwargs(event))
@@ -407,6 +421,21 @@ def test_a_pattern_outside_the_subset_grants_nothing() -> None:
         ("git status|ls", "git status", True),
         ("git status|ls", "git status ls", False),
         ("make (a+)+", "make aaaa", True),
+        (r"git log -n \d+", "git log -n 12", True),
+        (r"git log -n \d+", "git log -n x", False),
+        (r"rm\s+-f scratch", "rm  -f scratch", True),
+        (r"rm\s+-f scratch", "rm-f scratch", False),
+        (r"npm run [\w.-]+", "npm run build.prod", True),
+        (r"npm run [\w.-]+", "npm run a b", False),
+        (r"ls [^\s]+", "ls a b", False),
+        ("make a{2}", "make aa", True),
+        ("make a{2}", "make aaa", False),
+        ("make a{2,3}", "make a", False),
+        ("make a{2,3}", "make aaa", True),
+        ("make a{2,3}", "make aaaa", False),
+        ("make a{2,}", "make aaaaa", True),
+        ("make (ab){0,2}c", "make ababc", True),
+        ("make (ab){0,2}c", "make abababc", False),
     ],
 )
 def test_classes_groups_alternation_and_repeats_are_read_like_kiro_cli(
@@ -438,6 +467,52 @@ def test_nested_repetition_matches_in_linear_time(
     )
     assert allowed_commands.matches(parsed, command)
     assert not allowed_commands.matches(parsed, command + "!")
+
+
+@pytest.mark.parametrize("pattern", [r"git log -n \d+", r"ls [\w]+", r"ls\s.*"])
+def test_a_class_escape_does_not_judge_a_non_ascii_command(pattern: str) -> None:
+    """Rust reads ``\\d \\s \\w`` over Unicode and Crew over ASCII, so an entry using
+    one judges no non-ASCII command: it grants nothing, without spending the budget
+    the entries after it share, and a deny reader reads it as "cannot judge"."""
+    from kiro_crew.platform import allowed_commands
+
+    parsed = allowed_commands.parse(pattern)
+    assert parsed is not None and parsed.ascii_only
+    budget = [allowed_commands._MAX_MATCH_STEPS]
+    assert not allowed_commands._match(parsed, "git log -n \uff11\uff12", budget)
+    assert budget[0] == allowed_commands._MAX_MATCH_STEPS
+    assert allowed_commands.denied_match([pattern], "ls caf\u00e9") is None
+    assert not allowed_commands.matches_any([pattern], "ls caf\u00e9")
+    # Skipped in a list: the entries after it still judge the command, in any order.
+    for entries in ([pattern, "ls caf(\u00e9|e)"], ["ls caf(\u00e9|e)", pattern]):
+        assert allowed_commands.matches_any(entries, "ls caf\u00e9")
+        # The gate's chain matcher reads a plain command the same way.
+        assert allowed_commands.chain_matches_all(entries, "ls caf\u00e9")
+        assert _judge(_shell("ls caf\u00e9"), entries).tier == "spec-builtin-grant"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "refused"),
+    [
+        ("make (a{256}){256}", True),
+        ("git status(((){0,256}){256}){256}", True),
+        ("git status((){256}){256}", True),
+        # Copies of an empty group add no state, so this one compiles, and small.
+        ("git status(){256}(){256}" * 20, False),
+    ],
+)
+def test_counted_repeats_are_bounded_when_expanded(pattern: str, refused: bool) -> None:
+    """No short entry expands into a program past the state bound: its expansion
+    is refused, or it adds no state (an empty group), as in Rust."""
+    from kiro_crew.platform import allowed_commands
+
+    assert allowed_commands.parse("make (a{32}){32}") is not None
+    parsed = allowed_commands.parse(pattern)
+    if refused:
+        assert parsed is None
+    else:
+        assert parsed is not None and parsed.program is not None
+        assert len(parsed.program) <= allowed_commands._MAX_PROGRAM_STATES
 
 
 def test_a_match_past_the_step_budget_grants_nothing() -> None:
@@ -534,9 +609,15 @@ def test_an_allow_list_over_the_bound_is_named() -> None:
     "extra",
     [
         {"permissions": {"rules": [{"capability": "shell", "effect": "ask"}]}},
-        {"toolsSettings": {"shell": {"allowedCommands": ["git status"], "deniedCommands": ["x"]}}},
+        # A deny Crew cannot read itself (`\p`) keeps them withheld; one it can
+        # read lets the gate answer them (test_kas_spec_denies).
+        {
+            "toolsSettings": {
+                "shell": {"allowedCommands": ["git status"], "deniedCommands": ["x\\pL"]}
+            }
+        },
     ],
-    ids=["authored-ask", "denied-commands"],
+    ids=["authored-ask", "unreadable-denied-commands"],
 )
 def test_the_notice_names_allowed_commands_the_session_withholds(extra: dict[str, Any]) -> None:
     spec = _spec(**{"toolsSettings": {"shell": {"allowedCommands": ["git status"]}}, **extra})
@@ -569,7 +650,7 @@ def test_the_projection_records_the_patterns_and_relays_no_shell_allow() -> None
     "extra",
     [
         {"permissions": {"rules": [{"capability": "shell", "effect": "ask"}]}},
-        {"toolsSettings": {"shell": {"allowedCommands": ["git status"], "denyByDefault": True}}},
+        {"toolsSettings": {"shell": {"allowedCommands": ["git status"], "timeout": 5}}},
         {"toolsSettings": {"shell": {"allowedCommands": ["git status"], "deniedCommands": ["x"]}}},
     ],
     ids=["authored-ask", "other-shell-setting", "denied-commands"],
@@ -582,15 +663,44 @@ def test_an_authored_shell_restriction_withholds_the_patterns(extra: dict[str, A
 
 
 def test_the_grant_itself_is_not_read_as_a_restriction() -> None:
-    from kiro_crew.acp.kas_grant_only_settings import without_allowed_commands
+    from kiro_crew.acp.kas_grant_only_settings import (
+        without_allowed_commands,
+        without_shell_grant_keys,
+        without_write_grant_keys,
+    )
 
     assert without_allowed_commands({"shell": {"allowedCommands": ["x"]}, "read": {"a": 1}}) == {
         "read": {"a": 1}
     }
+    # `without_allowed_commands` keeps every other shell key as a restriction.
     assert without_allowed_commands(
         {"execute_bash": {"allowedCommands": ["x"], "denyByDefault": True}}
     ) == {"execute_bash": {"denyByDefault": True}}
     assert without_allowed_commands("bad") == "bad"
+    # For the `allowedCommands` reading, `denyByDefault` and a boolean
+    # `autoAllowReadonly` never turn a matched command into a prompt on kiro-cli, so
+    # they go too; any other key stays.
+    assert (
+        without_shell_grant_keys(
+            {"execute_bash": {"allowedCommands": ["x"], "denyByDefault": True}}
+        )
+        == {}
+    )
+    assert without_shell_grant_keys(
+        {"shell": {"allowedCommands": ["x"], "autoAllowReadonly": True, "deniedCommands": ["y"]}}
+    ) == {"shell": {"deniedCommands": ["y"]}}
+    assert without_shell_grant_keys({"shell": {"autoAllowReadonly": "yes"}}) == {
+        "shell": {"autoAllowReadonly": "yes"}
+    }
+    assert without_shell_grant_keys("bad") == "bad"
+    # The write `allowedPaths` reading: `fallbackAction` only decides an uncovered
+    # write, so it goes; `deniedPaths` stays.
+    assert without_write_grant_keys(
+        {"write": {"allowedPaths": ["a/**"], "fallbackAction": "deny"}, "shell": {"x": 1}}
+    ) == {"shell": {"x": 1}}
+    assert without_write_grant_keys(
+        {"fs_write": {"allowedPaths": ["a/**"], "deniedPaths": ["a/x"]}}
+    ) == {"fs_write": {"deniedPaths": ["a/x"]}}
 
 
 def test_a_permissions_shell_allow_is_answered_by_its_globs() -> None:

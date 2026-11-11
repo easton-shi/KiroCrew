@@ -170,7 +170,13 @@ Once the wheel is in, the installer runs the new `kirocrew kas install` to
 download the [built-in KAS engine](#first-run) this release pins (about 55-70 MB
 for your platform). If that download fails, for example on a host with no
 access to the CDN, the install still succeeds and the installer prints the
-command to retry. Pass `--no-kas` (or set `KIROCREW_INSTALL_KAS=0`) to skip it:
+command to retry. On a host that cannot run the engine at all (no build for its
+platform, or a glibc older than the engine needs), Kiro Crew stays installed and
+the installer says why a chat on the default agent cannot start there in place
+of its next steps. A first install then exits 3; a re-run over an existing
+install, which is what `kirocrew update` does, exits 0. Pass `--no-kas` (or set
+`KIROCREW_INSTALL_KAS=0`) to skip the engine, for example on a host whose agent
+does not use it:
 
 ```bash
 curl -fsSL https://download.crew.kiro.dev/cli.sh | sh -s -- --no-kas
@@ -201,9 +207,8 @@ installed by the installer. Every release from `0.1.2` onward can be pinned.
 **These two releases will not be backfilled.** Signing an already-published
 digest today would create a fresh attestation for bytes that no signing
 pipeline produced, which asserts a provenance the project cannot re-establish
-after the fact. [SECURITY.md](../../SECURITY.md) already limits active support
-to the latest release, so the trust surface would widen for two releases that
-are several minor versions behind current `stable` and are supported by nobody.
+after the fact. Backfilling would also widen the trust surface for two releases
+that are several minor versions behind current `stable`.
 Their artifacts stay published and their `SHA256SUMS` stays fetchable for
 archival inspection, but the installer has no checksum-only path, so it will
 not install them.
@@ -236,9 +241,13 @@ finds one running (an active `kirocrew` systemd unit, the
 the data home's `gateway.lock`), it ends with a warning that names the restart
 command for that setup, such as `systemctl --user restart kirocrew`. Run it
 straight away. On a host that restricts unprivileged user
-namespaces and uses the `kirocrew-userns` AppArmor profile, run
-`kirocrew service install` again after every update so the profile follows the
-new launcher; the gateway's automatic update waits for you instead of applying
+namespaces and uses the `kirocrew-userns` AppArmor profile, the profile is
+attached to the launcher of every `crew-venv-<version>` tree, so it keeps
+applying after an update. A profile attached to one tree's exact path (one an
+earlier Kiro Crew wrote, or one written where the directory holding the install
+is not owned by the service's account alone) does not: run
+`kirocrew service install` again after the update so the profile follows the
+new launcher. The gateway's automatic update waits for you instead of applying
 there, and `kirocrew doctor` reports the attachment under Sandbox.
 
 The installer provisions its own Python by default instead of depending on the
@@ -266,7 +275,11 @@ interpreter cannot be downloaded and a usable system Python 3.12+ exists, the
 run falls back to it with a warning (and retries the managed default next
 time); air-gapped hosts can point `KIROCREW_UV_URL` at a mirror of the uv
 release tree and `UV_PYTHON_INSTALL_MIRROR` at a mirror of the interpreter
-archives — the pinned SHA-256 digests are enforced either way. The signed
+archives — the pinned SHA-256 digests are enforced either way. Behind a
+TLS-intercepting proxy, uv's own bundled certificate roots refuse the
+interpreter download (`UnknownIssuer`) even when the system trusts the proxy's
+CA, so the installer retries that download once on the system certificate store
+(`UV_NATIVE_TLS=1`); a `UV_NATIVE_TLS` you set yourself is left as it is. The signed
 installer never pipes an unsigned third-party script into a shell: uv is
 fetched as a tarball and verified against pinned digests, exactly like the
 wheel itself. On a terminal the wheel download draws curl's progress bar and
@@ -436,13 +449,16 @@ are published, and they serve different needs:
 
 ```bash
 # 1. Track a channel. A PEP 503 simple index per channel, so pip resolves the
-#    newest version itself. --pre is required: every published version carries a
-#    prerelease suffix on nightly and insider.
+#    newest version itself. Stable versions carry no prerelease suffix, so the
+#    stable line needs no --pre. Every insider and nightly version does carry
+#    one, so those channels need it — and --pre then applies to every package
+#    pip resolves, third-party dependencies included:
+#      pip install --pre kirocrew --extra-index-url https://updates.crew.kiro.dev/feed/insider/simple/
 #    NOTE: --extra-index-url ADDS the channel index beside default PyPI, so pip
 #    pools `kirocrew` candidates across both and a higher-versioned public-PyPI
 #    package of the name would win. Prefer form 2 (or verify the installed
 #    artifact) where that exposure matters.
-pip install --pre kirocrew --extra-index-url https://updates.crew.kiro.dev/feed/stable/simple/
+pip install kirocrew --extra-index-url https://updates.crew.kiro.dev/feed/stable/simple/
 
 # 2. Pin one exact wheel by hash. Every version directory publishes a SHA256SUMS
 #    file beside the wheel; take your wheel's hash from there. pip verifies it and
@@ -486,8 +502,8 @@ command installed on `PATH`.
 
 Optional extras. Kiro Crew is not on PyPI, so `pip install "kirocrew[voice]"`
 cannot resolve — install an extra's own distributions into the environment that
-runs the gateway instead (e.g. `pip install 'boto3>=1.34,<2'
-'amazon-transcribe>=0.6.3,<1' 'pywhispercpp>=1.5,<2'` for `voice`). The dashboard
+runs the gateway instead (e.g. `pip install "boto3>=1.34,<2"
+"amazon-transcribe>=0.6.3,<1" "pywhispercpp>=1.5,<2"` for `voice`). The dashboard
 prints the exact command, already pointed at the right interpreter.
 
 | Extra | Adds | For |
@@ -635,7 +651,7 @@ Override the Python interpreter with `make PY=python3.12 build`, or
 the `<data-home>/python-bin` marker `ensure-python.sh` records; a `PY` exported
 in the environment does not, so the marker still wins over it.
 
-`make wheel`, `make backend-bin` and `make desktop` take `EDITION=oss` or `EDITION=enterprise`, stamped into the built package's `kiro_crew/edition.py`. Only `EDITION=` on the `make` command line counts; an exported shell `EDITION` is ignored, even under `make -e`. Without it, the value comes from the `KIROCREW_BUILD_EDITION` environment variable, and then defaults to `oss`. Both set to different values, or any other value (wildcards such as `%` included), fails the build before it starts. On Windows, set `KIROCREW_BUILD_EDITION` before `.\make.ps1`. See [platform-context](../system-specs/modules/platform-context.md#build-time-edition-constant).
+`make wheel`, `make backend-bin` and `make desktop` take `EDITION=oss` or `EDITION=lts`, stamped into the built package's `kiro_crew/edition.py`. Only `EDITION=` on the `make` command line counts; an exported shell `EDITION` is ignored, even under `make -e`. Without it, the value comes from the `KIROCREW_BUILD_EDITION` environment variable, and then defaults to `oss`. Both set to different values, or any other value (wildcards such as `%` included), fails the build before it starts. On Windows, set `KIROCREW_BUILD_EDITION` before `.\make.ps1`. See [platform-context](../system-specs/modules/platform-context.md#build-time-edition-constant).
 
 Both desktop targets run `packaging/build-desktop.sh` on every platform,
 including Windows, where `make.ps1` invokes it through the Git for Windows bash:
@@ -842,9 +858,17 @@ and needs no sudo. That plist is a per-user LaunchAgent, so on a Mac the gateway
 starts when you log in, not at boot; see
 [The gateway does not start after a reboot until someone logs in](macos-troubleshooting.md#the-gateway-does-not-start-after-a-reboot-until-someone-logs-in).
 
+On a Linux host that systemd did not boot (no `/run/systemd/system`, as in a
+container whose PID 1 is something else, or WSL without systemd),
+`service install` refuses before anything is written, because no system unit
+could start there. Run `kirocrew gateway` under that host's own supervisor or
+boot script instead.
+
 The gateway runs untrusted agent tools, so it must run as a **non-root** user:
 the installer sets `User=` to the account behind `sudo` (`$SUDO_USER`, else
-`$USER`), and **refuses to install a `User=root` service**. From a bare `root`
+`$USER`, else `$LOGNAME`, else the account that owns the process's uid, so a
+non-interactive `ssh` session with neither variable set still resolves it),
+and **refuses to install a `User=root` service**. From a bare `root`
 login (or `sudo` with no `$SUDO_USER`), first create or pick a normal account and
 install as it, e.g. `sudo -u <user> KIROCREW_KIRO_BIN=... kirocrew service
 install` (the official Docker image already runs as the `kirocrew` user).
@@ -865,7 +889,11 @@ When another gateway already serves the same data home, the unit exits 78 and
 goes `failed` once instead of restarting, because the unit's
 `RestartPreventExitStatus=` names that code. A unit file without that directive
 keeps relaunching against the refusal; re-run `kirocrew service install` to
-rewrite it. See [Service Management](../system-specs/modules/cli.md#service-management)
+rewrite it. A unit installed before v0.10.0 on systemd 219 (Amazon Linux 2,
+RHEL 7) has the same fix: its restart cap sits where 219 does not read it, so a
+gateway that fails at boot restarts without end. `kirocrew service status` and
+`kirocrew doctor` name either one. See
+[Service Management](../system-specs/modules/cli.md#service-management)
 in the CLI spec for the details.
 
 ### SELinux-enforcing hosts with kirocrew under `$HOME`
@@ -1044,10 +1072,15 @@ kirocrew service install
 
 Where, and only where, this mechanism is the one in play, the installer also
 writes `/etc/apparmor.d/kirocrew-userns` and loads it. The profile grants
-exactly one permission (`userns`) and is **attached** to the resolved kirocrew
-launcher script (the same absolute path `service install` uses as `ExecStart`,
-typically something like `~/.kiro/crew-venv/bin/kirocrew`) — the same approach
-stock Ubuntu already uses for `chrome` and `brave`. The unit carries no
+exactly one permission (`userns`) and is **attached** to the kirocrew launcher
+script the unit's `ExecStart` resolves to, the same approach stock Ubuntu
+already uses for `chrome` and `brave`. For the managed install the attachment
+is `~/.kiro/crew-venv-*/bin/kirocrew`: an update installs each version as its
+own `crew-venv-<version>` tree, and the `*`, which never matches a `/`, covers
+each tree's launcher, so the profile keeps applying after an update. That form
+is used only when the directory holding those trees is owned by the service's
+account and writable by no other; anywhere else the profile is attached to the
+one resolved launcher path. The unit carries no
 `AppArmorProfile=` directive: that directive labels only the unit's own
 top-level process, and the gateway's sandbox probe runs in a child reached
 through a fork the directive's labelling never reaches.
@@ -1057,6 +1090,10 @@ it costs no additional privilege, and it **cannot fail your install**: if the
 profile cannot be written, loaded, or verified, you get a warning and the
 install continues. `kirocrew service uninstall` unloads and removes it, so a
 host is left as it was found rather than carrying an orphaned userns permission.
+
+The one-line installer (`cli.sh`) reads the same sysctl. When it is `1` and
+`/etc/apparmor.d/kirocrew-userns` is not there, the installer says, before its
+next steps, that agents cannot run until this command installs the profile.
 
 The installer skips the profile silently, with a reason it can print, when
 AppArmor is not an active LSM, when the sysctl is not `1`, when
@@ -1110,7 +1147,10 @@ that need it (`install`, `apparmor_parser`, `aa-exec`) and prompts you for a
 password when it does; running the whole thing as root would execute application
 code with privilege for no reason.
 
-Then restart the app. To check whether the launch you are looking at is covered:
+Then restart the app. The same restriction is why the AppImage starts the app
+with Chromium's sandbox off (`--no-sandbox`); the app shows a notice with this
+command when it does, and the profile turns both sandboxes back on. To check
+whether the launch you are looking at is covered:
 
 ```bash
 kirocrew sandbox status

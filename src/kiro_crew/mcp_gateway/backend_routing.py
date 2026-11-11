@@ -14,9 +14,9 @@ Instance fields written: ``_dead_reason``, ``_grant_callers``,
 ``_lease_pending_riders``, ``_lease_release_waiters``, ``_metric_tasks``,
 ``_orphaned_leases``, ``_pending_requests``, ``_resource_subscriptions``.
 
-Instance fields read: ``_inbox_lock``, ``_init_state``, ``_stub_inboxes``,
-``attempt_id``, ``backend_generation_id``, ``exclusive_token``, ``pool_key``,
-``process``, ``refcount``, ``stdout``, ``supports_caller_identity``.
+Instance fields read: ``_gateway_ending``, ``_inbox_lock``, ``_init_state``,
+``_stub_inboxes``, ``attempt_id``, ``backend_generation_id``, ``exclusive_token``,
+``pool_key``, ``process``, ``refcount``, ``stdout``, ``supports_caller_identity``.
 """
 
 from __future__ import annotations
@@ -214,12 +214,20 @@ async def run_stdout_pump(self: Backend) -> None:
     except Exception:  # pragma: no cover — defensive
         logger.exception("backend stdout pump crashed pid=%s", self.pid)
     finally:
-        reason = self._dead_reason or (
-            f"exit rc={self.process.returncode}"
-            if self.process.returncode is not None
-            else "stdout EOF"
-        )
-        self._dead_reason = reason
+        reason = self._dead_reason
+        if reason is None:
+            reason = (
+                f"exit rc={self.process.returncode}"
+                if self.process.returncode is not None
+                else "stdout EOF"
+            )
+            if self._gateway_ending:
+                # The gateway is ending the process: its own death.
+                self._dead_reason = reason
+            else:
+                # No reason was recorded first: the server went on its own, so
+                # the death is named with what it said.
+                await self._report_backend_exit(reason)
         await self._broadcast_backend_gone(reason)
 
 
@@ -513,19 +521,30 @@ async def _settle(
                         # replay's caller — record it so a later
                         # detach can release as the right principal.
                         self._grant_callers[(orphan_uri, pending.replay_stub)] = pending.caller
-                elif pending.release_owed:
-                    # A granted lease nobody wants, with a release left
-                    # to this verdict: due now unless a stub of the
-                    # caller is routed for the URI or another same-caller
-                    # subscribe is in flight (``_hold_identity_release``).
+                elif self.supports_caller_identity and pending.caller is not None:
+                    # A granted lease nobody wants, held by the caller
+                    # that took it (a replay's grant belongs to the
+                    # replay's principal), whether or not a release was
+                    # left to this verdict (``release_owed``): due now
+                    # unless a stub of the caller is routed for the URI or
+                    # another same-caller subscribe is in flight
+                    # (``_hold_identity_release``).
                     if not self._hold_identity_release(orphan_uri, pending.caller):
                         await self._release_upstream_subscriptions(
                             [orphan_uri], caller=pending.caller
                         )
+                    elif orphan_uri not in self._resource_subscriptions:
+                        # Held for a subscribe in flight, so the grant is
+                        # live upstream with nobody routed: orphan-mark it,
+                        # as the unsubscribe path does, so its updates are
+                        # not charged to the server as a hazard.
+                        while len(self._orphaned_leases) >= _ORPHANED_LEASES_MAX:
+                            self._orphaned_leases.pop()
+                        self._orphaned_leases.add(orphan_uri)
                 elif orphan_uri not in self._resource_subscriptions:
-                    # A granted lease nobody wants: release on the
-                    # spot, as the caller that took it (a replay's
-                    # grant belongs to the replay's principal).
+                    # No per-caller subscription to decide (a server
+                    # without caller identity, or no caller): release on
+                    # the spot only while no stub is routed for the URI.
                     await self._release_upstream_subscriptions([orphan_uri], caller=pending.caller)
                 for rider_uuid, rider_id in riders:
                     await self._reply_locally(rider_uuid, rider_id, result={})
@@ -683,10 +702,18 @@ async def _route_backend_message(
             if not targets:
                 _params = msg.get("params")
                 _uri = _params.get("uri") if isinstance(_params, dict) else None
-                if isinstance(_uri, str) and _uri in self._orphaned_leases:
-                    # A retained lease the broker failed to release: the
-                    # update is a consequence of OUR lease handling, so
-                    # it is dropped without condemning the server.
+                if isinstance(_uri, str) and (
+                    _uri in self._orphaned_leases
+                    or any(
+                        p.release_owed and p.resource_uri == _uri
+                        for p in self._pending_requests.values()
+                    )
+                ):
+                    # A retained lease the broker failed to release, or a
+                    # live one whose release waits on a same-caller
+                    # subscribe in flight (``release_owed``): the update
+                    # is a consequence of OUR lease handling, so it is
+                    # dropped without condemning the server.
                     # The URI is deliberately NOT logged — resource URIs
                     # can carry tokens or presigned query parameters.
                     logger.debug(

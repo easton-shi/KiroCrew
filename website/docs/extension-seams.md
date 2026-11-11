@@ -9,12 +9,14 @@ The backend has the sibling mechanism, Composed Platform Providers: see
 [`docs/system-specs/modules/platform-context.md`](../../docs/system-specs/modules/platform-context.md).
 The two are independent. Nothing here reads `CONTRACT_VERSION`.
 
-## The sixteen registry seams
+## The eighteen registry seams
 
 Each entry is one registrar the edition may call, paired with the reader the core
-already calls. `src/extensions.ts` names exactly these sixteen in its header.
+already calls. `src/extensions.ts` names exactly these eighteen in its header.
 `src/test/extensionSeams.test.tsx` exercises each one except the source-provider
-seam, which has its own suite in `src/test/sourceProviderSeam.test.ts`.
+seam (`src/test/sourceProviderSeam.test.ts`), the Feature Preview row seam
+(`src/pages/settings/FeaturePreviewsEditionRows.test.tsx`) and the document-tab
+seam (`src/pages/chat/DocumentPanelTabs.test.tsx`), which have their own suites.
 
 File/tree/folder menu rows are **not** a composition-root seam: an installed app
 declares them in its manifest under `contributes.fileMenuItems[]` and core
@@ -30,6 +32,7 @@ POSTs the file context to the app's endpoint — see the App Kit publishing guid
 | Top-bar widgets | `apps/topBarWidgets.tsx` | `registerTopBarWidgets()` to `getTopBarWidgets()` |
 | Readout-capsule segments | `apps/capsuleSegments.tsx` | `registerCapsuleSegment()` to `getCapsuleSegments()` |
 | Overview status cards | `pages/overviewStatCards.tsx` | `registerOverviewStatCards()` to `getOverviewStatCards()` |
+| Feature Preview rows | `pages/settings/featurePreviewRows.ts` | `registerFeaturePreviewRows()` to `getFeaturePreviewRows()` (duplicate id refused through `reportSeamCollision`) |
 | Overview lower panel (single owner) | `pages/overviewPanel.tsx` | `registerOverviewPanel()` to `getOverviewPanel()` |
 | Overview built-in suppression (subtractive) | `pages/overviewBuiltins.ts` | `suppressOverviewBuiltin()` to `isOverviewBuiltinSuppressed()` |
 | Panel-navigation chords | `hooks/useKeyboardShortcuts.ts` | `registerPanelShortcut()`, read by the shortcut handler and `DEFAULT_SHORTCUTS` |
@@ -39,6 +42,7 @@ POSTs the file context to the app's endpoint — see the App Kit publishing guid
 | Remote-instance provisioner forms | `components/remoteProvisionerRenderers.tsx` | `registerRemoteProvisionerRenderer()` to `getRemoteProvisionerRenderer()` / `canRenderRemoteProvisionerKind()` |
 | Remote-crew row actions (keyed by the row's `provisioner_id`; refuses `aws_ec2`, a chained row, an empty contribution and a duplicate) | `components/remoteCrewRowActions.tsx` | `registerCrewRowActions()` to `getCrewRowActions(inst)` |
 | Bare-token autolink rules | `utils/autolinkRules.ts` | `registerAutolinkRules()` to `getAutolinkRules()` |
+| Tabs beside an opened file or artifact (side panel) | `pages/chat/documentPanelTabRegistry.ts` | `registerDocumentPanelTabs()` to `getDocumentPanelTabs()`, rendered by `DocumentPanelTabs` |
 
 Plus two **exported-setter** seams for a value the core consumes itself (the
 product name and the feedback tracker), one **exported-transport** seam for
@@ -48,9 +52,9 @@ methods" and "Highlighting languages" below.
 
 Other `register*()` functions in `src/` (built-in surfaces, command-palette
 providers, tool pills, terminal sockets) are core-internal wiring, not edition
-seams. Only the sixteen above are called from the composition root.
+seams. Only the eighteen above are called from the composition root.
 
-Fifteen of the sixteen are **additive** — the edition contributes a surface. The
+Seventeen of the eighteen are **additive** — the edition contributes a surface. The
 remaining one is **subtractive**: `suppressOverviewBuiltin()` removes a built-in
 Overview surface for a distribution whose environment makes it permanently
 inapplicable, which no additive seam can express. It is named `suppress*` rather
@@ -130,7 +134,8 @@ Everything the registry seams brand is rendered by React — which means none of
 exists before React mounts. Four surfaces are shown earlier: the `<title>` during
 boot (and whenever a PWA-install dialog or bookmark samples it), the
 `<meta name="theme-color">`, the boot-failure panel's "worth reporting at" issue
-tracker links (shown when the bundle never arrived), and the PWA identity
+tracker links (shown when the bundle never arrived; the panel's heading also names
+the product from that `<title>` when it reveals), and the PWA identity
 (`manifest.json` plus `icon-192.png` / `icon-512.png`). `registerThemeBranding()`
 cannot reach any of them. The edition plugin patches them instead — the HTML
 fields on every build and dev transform, the `public/` overlay at build emit —
@@ -505,6 +510,28 @@ adds a self-contained `StatCard` (owning its own query and state, like the core
 `TunnelStatus`) to the Settings Overview grid, after the core cards, in ascending
 `order`. Each receives a `delay` prop for the grid's stagger animation.
 
+**Feature Preview rows.** `registerFeaturePreviewRows([{ id, component }])` adds a
+self-contained row to Settings > Developer > Feature Previews, after the core cards
+and before the Decisions card, in registration order. The component renders its
+own `SettingsCard` and switch and owns its own read and write, through the
+edition's own route (`contribute_routes`) and API module (`apiTransport`). Each
+row is wrapped in its own `ErrorBoundary` with the standard crash card, so a
+throwing row shows that card in its place and the other rows stay. A duplicate
+`id` is a collision (`reportSeamCollision`) and is ignored.
+
+**Document tabs.** `registerDocumentPanelTabs([{ id, label, requiresApp?, component }])`
+adds a tab beside a file or artifact opened in the chat side panel. App panel
+tabs (`contributes.panelTabs`) are free-standing and do not know which document
+is open; this seam's component receives it as `target` (`{ kind: 'file', path }`
+or `{ kind: 'artifact', slug, artifactKind }`), plus `active` and `slot`. The
+strip's first tab is the document itself, named by its file name or slug, and the
+document stays mounted while another tab shows. `label` is a function, read at
+render, so it follows the language picked after registration. `requiresApp`
+shows the tab only while that installed app is enabled, the same opt-in rule app
+contributions follow. Each tab body sits in its own `ErrorBoundary`. A
+working-tree diff gets no strip, and with no visible tab the document renders
+exactly as in the stock build.
+
 **Overview lower panel.** `registerOverviewPanel({ id, component })` claims the
 region below the Usage/Memory summary grid, which the stock build leaves empty.
 Unlike every other registry here this slot holds **at most one** entry: the first
@@ -750,7 +777,9 @@ composition benefit.
 So `api/apiTransport.ts` **exports** the blessed `apiTransport`, the same
 `get`/`post`/`put`/`del`/`patch` plus `j`/`jNullable` the core methods use
 (`client.ts` defines them and installs them via `installApiTransport` at its
-module load). An edition builds its OWN fully-typed API module on it:
+module load), and `getWithSignal`, the same `get` aborted by an `AbortSignal`
+for a read its caller bounds with `lib/withDeadline`. An edition builds its OWN
+fully-typed API module on it:
 
 ```ts
 import { apiTransport as t } from '../api/apiTransport'
@@ -765,7 +794,7 @@ static types on the edition side and no new *registry* contract. It never forks
 `client.ts` and never writes raw `fetch`, which would silently drop the session
 key.
 
-`ApiTransport` (the five request helpers plus the `j`/`jNullable` semantics) **is**
+`ApiTransport` (the six request helpers plus the `j`/`jNullable` semantics) **is**
 a small, intentionally frozen downstream contract, because a separately built
 edition compiles against it. There is no version guard on this seam, and the stock
 build stays green whatever you do to it (the seam is inert), so breakage surfaces
@@ -784,11 +813,11 @@ the shared `X-Session-Key` header, the session-expiry hooks a
 method that reads its own response calls, and `withJournaledDeadline` (a
 deadline that also records a timed-out read in the error journal). The
 route-specific parsers (`jInstancesDisabled`, `jCrewBoard`, `jSlotEnvironment`,
-`jSharedCrewPreview`, `jMembers` and `jApps`)
+`jSharedCrewPreview`, `jMembers`, `jApps` and `jConfigPending`)
 are core-only and deliberately absent from `ApiTransport` above: each opts one
 specific benign denial on one core route out of the error journal (a disabled
 instances control plane's 403, a conductor with no ledger's 404 `no_ledger`, and
-the slot-environment, Shared Crew preview and members roster reads' 403 `owner_only`
+the slot-environment, Shared Crew preview, members roster and config-pending reads' 403 `owner_only`
 for a caller that is not the dashboard owner, and the app list's 403
 `relay_apps_teammate` for a teammate reaching the Crew through the relay), which is not an edition's decision to make. None of them imports a
 runtime value

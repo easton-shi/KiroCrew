@@ -166,6 +166,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _install_root_targets_with _install_root_targets_cached _resolved_install_root_targets
         _bundled_kas_targets_cached _bundled_kiro_cli_targets_cached _bundled_root_spellings
         _gateway_package_dir _APP_BACKEND_OWNED_LEAVES app_backend_visible_targets
+        app_declared_mask_targets _liftable_declared_file
         crew_home_visible_spellings carveout_chain_has_planted_link
         enterprise_policy_cache_view _caller_mask_contains _POLICY_CACHE_META_LEAF
         _policy_cache_meta_names_its_source
@@ -203,6 +204,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         _InodeAliases _inode_aliases_under _refuse_multilinked_credential_leaves _referent_identity
         _refuse_aliased_masked_leaves _masked_leaf_pathonly_alias_detail
         _masked_leaf_multilink_detail _masked_leaf_alias_search_hint masked_credential_leaf_aliases
+        _app_declared_leaves _hidden_leaves _hardlink_refused_leaves
         """.split()),
     "kiro_crew.sandbox_staging": tuple("""
         _materialize_maskable_dirs _materialize_live_target_mask_target
@@ -323,6 +325,7 @@ _MOVED: dict[str, tuple[str, ...]] = {
         name_scope_unit _CGROUP_TOTAL_MEMORY_FRACTION _CGROUP_FALLBACK_MAX_TOTAL_MEMORY_MB
         _CGROUP_DEFAULT_MAX_TOTAL_TASKS _default_max_total_tasks _default_max_total_memory_mb
         _slice_limits_from_config _SLICE_LIMITS_APPLIED ensure_agents_slice_limits
+        _slice_limits_unit _slice_limits_dir _fill_unset_parent_limits
         _USER_MANAGER_CGROUP_BASE _agents_slice_cgroup_dir _read_cgroup_counters
         read_cgroup_int _SLICE_THROTTLE_PROBE_SEEN _SLICE_THROTTLE_EDGE_AT
         _SLICE_THROTTLE_EDGE_HOLD_SECS agents_slice_throttling _SLICE_OOM_SEEN

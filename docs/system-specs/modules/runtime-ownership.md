@@ -47,7 +47,7 @@ reads the name. New work goes to the owner of its responsibility:
 | `src/kiro_crew/session_pid_provider_kill.py` | the synchronous teardown of a leaked provider (`_sync_kill_provider`: the gate, the commit, the identity-pinned group and descendant signals), the orphaned spawn-group signalling (`signal_orphaned_spawn_group`, `_signal_orphaned_runtime_group`), and `_tracked_child_has_runtime_identity`, the argv check that the vouched members of the ACP runtime's group signalling must pass, and so must a tracked `kiro_pids.txt` child reparented to a `systemd` subreaper in the facade's `_cleanup_orphaned_mcp_servers` |
 | `src/kiro_crew/session_pid_orphan_kill.py` | the unreachable-gatewayd, browser-daemon and MCP-subtree orphan kills, and their security event log records |
 | `src/kiro_crew/session_pid_mappings.py` | pruning stale `session_pid_<pid>` and `session_token_*` identity mappings |
-| `src/kiro_crew/session_pid_rss.py` | a session tree's resident memory |
+| `src/kiro_crew/session_pid_rss.py` | a session tree's resident memory, and the leftovers of a runtime's session: processes in it that its live tree does not reach (`find_session_leftovers`), ended only through `platform_compat.terminate_pids_pinned` (`end_session_leftovers`). They are not runtimes, so no lease or tenancy covers them and the runtime gate is not asked; `session_cleanup_leftovers` decides when (after a recycle once the root is gone, or mid-turn behind `session.watchdog_end_leftovers_mid_turn`) |
 
 ### What the model is made of
 
@@ -506,7 +506,11 @@ merely counted (`RuntimeReconciler._why_not_yet`, `_reconcile_unowned`):
    instance belongs to a live recorded runtime"). The stamp is inherited, so a
    `kiro-cli` an agent's shell tool starts carries its parent runtime's instance
    while appearing in no record of its own, and would otherwise be killed while the
-   session that started it waits on it. Only a holder this pass found recorded and
+   session that started it waits on it. An agent an MCP server starts is the same
+   case: the session's `kiro-cli` starts each server with its own environment, so a
+   workflow runner the server detaches, and each agent that runner starts, carry the
+   runtime's instance even after the server exits and the runner reparents to the
+   user manager (`test_runtime_reconcile_mcp_descendants.py`). Only a holder this pass found recorded and
    alive, leased or claimed can shelter a candidate, so a leaked tree cannot shelter
    itself and a tree whose recorded runtime died is still reclaimed. The anchor set
    is rebuilt each pass; until it is, the condition withholds. An unreadable instance

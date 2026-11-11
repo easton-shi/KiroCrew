@@ -52,7 +52,7 @@ begin on its own line; the assembly newline-terminates the caller's
 | 2 | `[CRITICAL RULES]` | `_critical_rules_for` (runtime-conditional) | unless the agent sets `includeCrewContext: false` |
 | 3 | `[CURRENT DATE]` | `get_local_tz` + `KiroCrewConfig.timezone` | always |
 | 4 | `[CURRENT AGENT]` / `[RUNTIME]` | `_runtime_display_name`, trusted `runtime_source` from the dispatcher | when a session key exists |
-| 4a | `[TOOL NAMES]` | `context_assembly/tool_names.py` → `tool_names_block`; the spelling rule in `agent_sdk/kas_tool_names.py` | KAS sessions only (`provider_type` is KAS's label); also in a minimal start and re-sent after a compaction. KAS resolves an MCP call only by `mcp_<server>_<tool>` or `@<server>/<tool>`, and Crew's prompts name tools bare |
+| 4a | `[TOOL NAMES]` | `context_assembly/tool_names.py` → `tool_names_block` | Selected by `provider_type`; also in a minimal start and re-sent after compaction. Direct calls use active definitions, with qualified-name examples and recovery for legacy loaders that return only bare names. Loader inputs copy exact catalogue IDs; executor calls preserve the returned ID and never use the direct-call fallback |
 | 4b | `[ACTIVE MODEL]` | `context_assembly/sections.py` → `active_model_block`, from the live provider's `served_model` (the accessor the dashboard's model label reads); the harness gate in `agent_sdk/served_model_identity.py` | goose sessions only (`crew_states_served_model`: goose's own system prompt names no model, kiro-cli's does), when the session reports a model; also in a minimal start and a slim resume, and restated every follow-up (§2). Without it a model asked which model it is answers from training priors |
 | 5 | `[CREW MEMBER OPERATING MODE]` | constant prose | member DM slot, and `_member_dispatch_held`: the live session's `member_dispatch_mounted` (whether its composer actually appended the session-control entry), falling back to `_member_backend_can_dispatch` only when no provider evidence reached the build |
 | 6 | `[MEMBER IDENTITY]` … | `_build_member_section` (see §5) | V1 member sessions |
@@ -80,6 +80,26 @@ ahead of every other block. Three rows are suppressed for it, each on the same
 (15) — the envelope carries its own persona, project documents and memory
 binding, so re-injecting those would duplicate them (§5). Read the table as the
 V1 / non-member order.
+
+**The per-chat steering list reads these gates, never a copy.**
+`src/kiro_crew/steering_plan.py` answers, for one chat, whether each global,
+project and folder steering file reaches it: `briefing` for a member chat (the
+envelope decides), `harness` where KAS (`native_steering`) or kiro-cli (while the
+workspace inherits default resources, or for a document the agent's own
+`resources` name) loads it, and `no` on a harness with no path (`_project_steering_delivered`).
+Where Crew writes the text it reads the writer itself, not a copy of its rules: on
+Claude Code (the `kirocrew` template the turn resolves) the rows come from
+`context_assembly.agent_spec.steering_resource_documents`, the one list
+`_load_steering_resources` joins, so a document the load keeps is `yes`, one it
+withholds is `no`, and one it reads from outside the two trees (`AGENTS.md`) gets
+its own row; folder documents are `yes` only when row 19's bounded section, rendered
+at the same `caps.steering` after the same `_folder_steering_delivery_snapshot` skip
+(the live session's launch record included), keeps them, and `briefing` in a member
+chat, whose essentials envelope decides them. `GET /api/chat/slots/{slot}/steering`
+(`dashboard/handlers/chat_steering.py`) serves it to the Context breakdown tab;
+`test_chat_steering_plan.py` pins the Claude Code verdicts to what
+`_load_steering_resources` sends. Design:
+`docs/request-for-change/rfc-chat-steering-context.md`.
 
 Then the per-turn blocks of §2 follow, and the user's own text is last. This
 build happens *after* the user's message arrives, so it lands directly on
@@ -301,13 +321,16 @@ The mechanism, when on:
   that wrap a request in Kiro Crew's own text pass the request alone: a
   task-runner step its own title and description (`task_executor.task_trigger_text`,
   not the role text, the plan's other steps, the spec or the instructions), a
-  task decomposition the spec, and a workflow authoring turn the intent (through
+  task decomposition the spec, a workflow authoring turn the intent (through
   `WorkflowScope.prompt`, not the authoring instructions or the reference
-  workflows). Other callers match the turn text.
-  A Discord or Webex DM auto-nudge reads the loop's message instead of the
-  `[auto-nudge cycle N]` text it delivers: `_fire_dm_nudge` hands it to the
-  dispatcher's `handle_message` as `skill_trigger_text`, and the channel pipeline
-  (`ChannelTurns.answer`, `ChannelTurn.skill_trigger_text`) passes it to the build.
+  workflows), and a heartbeat task its text without the `HEARTBEAT_KEEP`
+  reminder. Other callers match the turn text.
+  A Slack-thread auto-nudge, and a Discord or Webex DM one, read the loop's
+  message instead of the `[auto-nudge cycle N]` text (and ledger snapshot) they
+  deliver: `_fire_slack_inner_nudge` passes it to `build_message`, and
+  `_fire_dm_nudge` hands it to the dispatcher's `handle_message` as
+  `skill_trigger_text`, which the channel pipeline (`ChannelTurns.answer`,
+  `ChannelTurn.skill_trigger_text`) passes to the build.
   A single-agent cron turn reads the job's prompt, not the `[User has seen and
   acknowledged ALL of the following ...]` list it appends for a job with
   acknowledged items (`slack/gateway_runtime/cron_turn.py`).
@@ -370,7 +393,11 @@ on its next match, never drops the skill.
 
 kiro-cli compacts its own window and drops the session-start blocks with it.
 `SessionManager.mark_needs_reinjection` arms a one-shot flag on confirmed
-compaction; the next turn reads it through `consume_reinjection` (owned by
+compaction, the Claude branch arms it when its compaction times out
+after taking the turn semaphore, and the harness-managed (KAS) branch when
+its `/compact` fails with no status reported
+([session](../system-specs/modules/session.md), "Context compaction"); the
+next turn reads it through `consume_reinjection` (owned by
 `messaging/turn_bracket.py`, re-exported from `messaging/dispatch.py`) and passes
 `needs_reinjection=True`. Every turn loop that can compact (calls
 `check_context_usage` or `compact_if_needed`) must consume the flag, forward it and
@@ -504,7 +531,7 @@ per-run model or effort override, or a member launch force the dedicated path.
 | `$KIROCREW_SCRATCH` | **the parent's** | **the parent's** (mounted as a second window) |
 
 `agent_scratch.py` → `allocate_scratch` gives each spawned agent **process**
-`<data home>/scratch/<label>-<token8>/`, and `scratch_env` points
+`<data home>/scratch/<token8>/`, and `scratch_env` points
 `TMPDIR`/`TMP`/`TEMP` at it — per process, not per session
 (`acp/client.py` for a dedicated client, `acp/runtime.py` for a runtime). It also
 pins kiro-cli's chat log there, but only where `cap_kiro_cli_logs` can bound it
@@ -694,6 +721,11 @@ child keeps layers 1 and 3 — losing the member would lose layer 3 with layer 1
 and loses the desk through the surface reason, while the spawn gate's
 `spawn_run(agent=…)` child of such a member is a plain template run on the
 parent's store with no member section.
+
+A **temporary** turn (`blocks_reads`) withholds layer 4 on every legacy delivery
+path: at the desk the section carries the `withheld by this turn's memory/privacy
+scope` placeholder instead of the briefing. An incognito turn blocks memory writes
+only and still reads it.
 
 Two failure behaviours are deliberate and opposite. A **missing** rules file reads
 as `""` (the normal unbounded-by-choice state). An **existing but unreadable** one
